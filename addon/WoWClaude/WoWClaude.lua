@@ -904,10 +904,17 @@ function WoWClaude.SkillLines()
 	local out = {}
 	if C_SkillInfo and C_SkillInfo.GetNumSkillLines then
 		local n = Try(C_SkillInfo.GetNumSkillLines)
+		local seen = {}
 		for i = 1, (type(n) == "number" and n or 0) do
 			local sk = Try(C_SkillInfo.GetSkillLineInfo, i)
-			if type(sk) == "table" and type(sk.name) == "string" then
-				out[#out + 1] = { name = sk.name, isHeader = sk.isHeader, rank = sk.rank, maxRank = sk.maxRank, skillID = sk.skillID }
+			-- Child lines (parentSkillLineID ~= 0) repeat their parent; Blizzard's
+			-- skills frame skips them too.
+			if type(sk) == "table" and type(sk.name) == "string" and (sk.parentSkillLineID or 0) == 0 then
+				local key = sk.isHeader and ("h:" .. sk.name) or (sk.skillID or sk.name)
+				if not seen[key] then
+					seen[key] = true
+					out[#out + 1] = { name = sk.name, isHeader = sk.isHeader, rank = sk.rank, maxRank = sk.maxRank, skillID = sk.skillID }
+				end
 			end
 		end
 		return out
