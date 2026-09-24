@@ -13,3 +13,4 @@ tests/tmp/
 .DS_Store
 *.zip
 bridge/probe.png
+bridge/mapjobs/

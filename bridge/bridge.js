@@ -204,9 +204,43 @@ function resolveClaude() {
 // What the game reads
 // ---------------------------------------------------------------------------
 
+// Map layers Claude drew (see protocol.js, "Map layers"). The bridge is the source of
+// truth; slot files carry the whole set while the game may not have it yet: for a
+// while after it changes, and after every hello (a fresh or wiped client).
+if (!state.map) state.map = P.newMap();
+const MAP_DIR = path.join(HERE, 'mapjobs');
+const MAP_SHARE_MS = 10 * 60 * 1000;
+let mapShareUntil = Object.keys(state.map.layers).length ? Date.now() + MAP_SHARE_MS : 0;
+
+function mapFileFor(job) {
+  return path.join(MAP_DIR, `${String(job.chat || 'default').replace(/[^\w-]/g, '_')}-${job.id}.jsonl`);
+}
+
+// Collect what the run asked for (its map file, then ```wowmap blocks in its
+// reply), apply it, and return the reply text without the blocks plus a note.
+function takeMapCommands(job, text) {
+  const file = mapFileFor(job);
+  let cmds = [], errors = [];
+  try {
+    const r = P.parseMapFile(fs.readFileSync(file, 'utf8'));
+    cmds = r.cmds; errors = r.errors;
+  } catch {}
+  try { fs.unlinkSync(file); } catch {}
+  const blocks = P.extractMapBlocks(text);
+  cmds.push(...blocks.cmds);
+  errors.push(...blocks.errors);
+  if (!cmds.length && !errors.length) return blocks.text;
+  const { changed, notes } = P.applyMapCommands(state.map, cmds);
+  if (changed) { saveState(); mapShareUntil = Date.now() + MAP_SHARE_MS; }
+  const all = [...notes, ...errors];
+  log(`#${job.id} map: ${all.join('; ') || 'no change'} (version ${state.map.version})`);
+  return blocks.text + (all.length ? `\n\n[map] ${all.join('; ')}` : '');
+}
+
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records) {
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore });
+  const map = Date.now() < mapShareUntil ? state.map : null;
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, map });
 }
 
 function addonInstalled() {
@@ -375,6 +409,7 @@ function submit(job) {
     saveState();
     signal('ack', job.id, true);
     maybeOfferRestore(job);
+    if (Object.keys(state.map.layers).length) mapShareUntil = Date.now() + MAP_SHARE_MS;
     publishNow();
     log(`hello from session ${job.session}${pendingRestore ? ' (restore offered)' : ''}`);
     return;
@@ -444,6 +479,11 @@ function runJob(job) {
 
   const env = { ...process.env };
   delete env.CLAUDECODE;
+  try {
+    fs.mkdirSync(MAP_DIR, { recursive: true });
+    fs.rmSync(mapFileFor(job), { force: true });
+    env.WOWCLAUDE_MAP_FILE = mapFileFor(job);
+  } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
   log(`${tag} (${job.via}) starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${sys ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
   const child = spawn(resolveClaude(), args, { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -517,6 +557,9 @@ function runJob(job) {
     clearInterval(keepalive);
     if (buffer.trim()) { try { handleEvent(JSON.parse(buffer.trim())); } catch {} }
     if (sessionId) { state.sessions[skey] = sessionId; (state.sessionCwd = state.sessionCwd || {})[skey] = cwd; }
+    // Map marks count whatever the outcome: the tools already reported them.
+    const withMap = takeMapCommands(job, resultText ?? '');
+    if (resultText !== null) resultText = withMap;
     if (resultText !== null && !isError) finish(job, 'done', resultText, sessionId, denied);
     else if (resultText !== null) finish(job, 'error', resultText, sessionId, denied);
     else finish(job, 'error', `claude exited with code ${code} and no result.\n${stderr.trim().slice(-1500)}`, sessionId);

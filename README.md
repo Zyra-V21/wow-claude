@@ -21,7 +21,7 @@ WoW addons are sandboxed: no network, no file reads at runtime. Two doors remain
 
 ## Requirements
 
-- Windows, NTFS
+- Windows (NTFS), or Linux with the game under Wine on an X11 session (see [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md))
 - World of Warcraft: Forever (tested on 1.60.1.69913, TOC 16001), **windowed or borderless** — exclusive fullscreen blocks screen capture
 - [Node.js](https://nodejs.org) 22.2 or newer
 - [Claude Code](https://claude.com/claude-code) installed and logged in (`claude --version` works)
@@ -103,6 +103,10 @@ Along with it, every run gets [docs/WOW-ADDON-PRIMER.md](docs/WOW-ADDON-PRIMER.m
 
 Click the input box, then **shift-click** an item in your bags, a spell in the spellbook, a quest in the log, or a link in the chat: it lands in your message the way it would in the game chat. When you send, each link becomes `[Name]` in the text and its tooltip (an item's stats, a spell's description) is attached below, so Claude sees what you see when hovering it. This works from the game chat box too (`/ai is this an upgrade? [Fine Longsword]`). Without a box focused, shift-click keeps its normal meaning.
 
+### Map, routes and gathering nodes
+
+Claude can draw on your world map: numbered route pins with lines, quest stops, marks, and a small navigator with an arrow and the distance to the next stop that advances as you arrive. Pair the bridge with the [wow-copilot](docs/MAP.md#the-copilot) data folder and ask things like *"route me through copper and tin in Loch Modan"* or *"plan the quests I can do in Westfall"*. `/wcmap` toggles every herb and ore spawn on the world map (`/wcmap ore`, `/wcmap herb`) and controls layers and navigation. Details in [docs/MAP.md](docs/MAP.md).
+
 ### Permissions
 
 Claude runs headless, so it can't ask you to approve a tool. `permissionMode` in `bridge/config.json` is `acceptEdits` by default (file edits inside the project are auto-approved) and `allowedTools` lists the commands it may run. Anything else is denied, and the reply grows an **Allow WebSearch, Bash(cargo:*) & retry** button: click it, the rules are added to your config permanently, and Claude resumes where it stopped. The rule is a prefix (`Bash(rm:*)` allows any `rm`), so read the button before clicking. `bypassPermissions` gives full autonomy; you decide.
@@ -135,6 +139,8 @@ The keys you are most likely to touch. Every key, flag and environment variable 
 - [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md): step-by-step install on a fresh machine, with troubleshooting
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every config key, command-line flag and environment variable
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the pixel strip, slot pool and signal files work, and why
+- [docs/INSTALL-LINUX.md](docs/INSTALL-LINUX.md): Linux + Wine install, and how to check the screen capture
+- [docs/MAP.md](docs/MAP.md): map layers, the navigator and herb/ore nodes (the copilot)
 - [CONTRIBUTING.md](CONTRIBUTING.md): repo layout, running the tests, conventions
 - [CHANGELOG.md](CHANGELOG.md): release notes
 

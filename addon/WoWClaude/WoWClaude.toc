@@ -3,8 +3,10 @@
 ## Notes: Talk to your local Claude Code sessions from inside the game. Needs the companion bridge (see README).
 ## Author: chelinho139
 ## Version: 0.3.0
-## SavedVariables: WoWClaudeDB
+## SavedVariables: WoWClaudeDB, WoWClaudeMapDB
+## OptionalDeps: WoWClaude_Nodes
 
 Codec.lua
 Inbox.lua
 WoWClaude.lua
+Map.lua

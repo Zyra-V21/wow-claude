@@ -733,6 +733,7 @@ local function TryLoadSlot(why)
 	if type(data) == "table" and type(data.cwd) == "string" and data.cwd ~= "" then run.bridgeCwd = data.cwd end
 	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
 	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
+	if type(data) == "table" and data.map and WoWClaudeMap then WoWClaudeMap.Sync(data.map) end
 	if why == "signal" and not matched then
 		run.signalUnreliable = true
 	end
@@ -835,6 +836,7 @@ local function ProcessInbox()
 	if type(inbox.cwd) == "string" and inbox.cwd ~= "" then run.bridgeCwd = inbox.cwd end
 	ApplyReplies(inbox.replies)
 	if inbox.restore then ImportRestore(inbox.restore) end
+	if inbox.map and WoWClaudeMap then WoWClaudeMap.Sync(inbox.map) end
 end
 
 Finish = function(chat, role, text, denied)
@@ -869,7 +871,7 @@ end
 -- are meaningless markup to Claude; their tooltips are what the player sees).
 -- Every game API here is optional: whatever the client lacks is left out.
 
-local CONTEXT_MAX = 700 -- bytes of context per record; the strip has ~3.2 KB for everything
+local CONTEXT_MAX = 900 -- bytes of context per record; the strip has ~3.2 KB for everything
 local LINK_LINES_MAX = 30 -- tooltip lines kept per link
 local LINK_BYTES_MAX = 900 -- bytes kept per link
 
@@ -984,6 +986,28 @@ function WoWClaude.GameContext()
 		end
 		if #parts > 0 then table.insert(lines, "Professions: " .. table.concat(parts, ", ")) end
 	end
+
+	-- Quest log ids (what is accepted, and which are done), so route planning can
+	-- skip pickups and turn-ins that no longer apply.
+	local quests = {}
+	local qn = Try(C_QuestLog and C_QuestLog.GetNumQuestLogEntries) or Try(GetNumQuestLogEntries)
+	if type(qn) == "number" then
+		for i = 1, math.min(qn, 40) do
+			local id, header, complete
+			local info = Try(C_QuestLog and C_QuestLog.GetInfo, i)
+			if type(info) == "table" then
+				id, header = info.questID, info.isHeader
+				complete = Try(C_QuestLog.IsComplete, id)
+			else
+				local _, _, _, isHeader, _, isComplete, _, qid = Try(GetQuestLogTitle, i)
+				id, header, complete = qid, isHeader, isComplete == 1 or isComplete == true
+			end
+			if not header and type(id) == "number" and id > 0 then
+				table.insert(quests, tostring(id) .. (complete and "*" or ""))
+			end
+		end
+	end
+	if #quests > 0 then table.insert(lines, "Quest log (id, * = ready to turn in): " .. table.concat(quests, ",")) end
 
 	local s = table.concat(lines, "\n"):gsub("[\30\31]", " ")
 	if #s > CONTEXT_MAX then s = s:sub(1, CONTEXT_MAX) end

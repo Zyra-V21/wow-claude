@@ -34,12 +34,15 @@ Keys under `capture`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Run `capture.ps1`. With `false` only the reload path works (`/wow-claude mode reload` in game). |
+| `enabled` | `true` | Run `capture.ps1` (Windows) or `capture_x11.py` (Linux). With `false` only the reload path works (`/wow-claude mode reload` in game). |
 | `processName` | `"WowB"` | The game executable without `.exe`. `setup.js` sets it from the `Wow*.exe` it finds in the client folder. |
 | `cellPx` | `4` | Pixel size of one strip cell. Must match `CELL` in `addon/WoWClaude/Codec.lua`. |
 | `cellsPerRow` | `200` | Cells per strip row. Must match the addon. |
 | `maxRows` | `48` | Maximum strip rows captured. Must match the addon. |
 | `intervalMs` | `250` | Capture period. Lower is more responsive and costs a little more CPU. |
+| `python` | `"python3"` | Linux: interpreter for `capture_x11.py`. |
+| `windowName` | `""` | Linux: find the game window by title substring instead of by WM_CLASS (`<processName>.exe`). |
+| `keepComposited` | `false` | Linux: set `_NET_WM_BYPASS_COMPOSITOR=2` on the game window so the compositor keeps drawing it. Try it if `npm run probe` sees a black or stale strip in borderless fullscreen. |
 
 The capture region is `cellsPerRow × cellPx` by `maxRows × cellPx` pixels (800 × 192 by default) at the top-left of the game's client area.
 
@@ -74,6 +77,7 @@ Exit codes: `0` normal, `1` the injected or one-shot job failed, `2` config miss
 |---|---|
 | `WOW_CLAUDE_PROJECT` | Default working folder, below `--project` and above the start folder in precedence. |
 | `CLAUDECODE` | Removed from the child's environment so a bridge started from inside a Claude Code session can still launch `claude -p`. |
+| `WOWCLAUDE_MAP_FILE` | Set by the bridge for each Claude run: a file where tools append map commands, one JSON per line (see [MAP.md](MAP.md)). |
 
 ## Which folder Claude works in
 
@@ -96,6 +100,7 @@ All of these are gitignored.
 | `bridge/config.json` | Your configuration. |
 | `bridge/state.json` | Claude session ids per chat, the folder each session ran in, handled message ids per addon session token, the presence counter, and the latest game context the addon sent (`context`). Delete it to forget all sessions. |
 | `bridge/transcripts.json` | The last 200 messages of every chat, so the addon can recover its chats after the client wipes saved data. |
+| `bridge/mapjobs/` | One map command file per running Claude job (`WOWCLAUDE_MAP_FILE`), read and deleted when the job ends. Map layers themselves live in `state.json` (`map`). |
 | `bridge/bridge.log` | Everything printed to the console, with timestamps. Grows without bound; delete it whenever you like. |
 
 ## `setup.js` flags
