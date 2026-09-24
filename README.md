@@ -105,7 +105,7 @@ Click the input box, then **shift-click** an item in your bags, a spell in the s
 
 ### Map, routes and gathering nodes
 
-Claude can draw on your world map: numbered route pins with lines, quest stops, marks, and a small navigator with an arrow and the distance to the next stop that advances as you arrive. Pair the bridge with the [wow-copilot](docs/MAP.md#the-copilot) data folder and ask things like *"route me through copper and tin in Loch Modan"* or *"plan the quests I can do in Westfall"*. `/wcmap` toggles every herb and ore spawn on the world map (`/wcmap ore`, `/wcmap herb`) and controls layers and navigation. Details in [docs/MAP.md](docs/MAP.md).
+Claude can draw on your world map: numbered route pins with lines, quest stops, marks, and a small navigator with an arrow and the distance to the next stop that advances as you arrive. Give Claude game data to work from (see [the copilot](docs/MAP.md#the-copilot)) and ask things like *"route me through copper and tin in Loch Modan"* or *"plan the quests I can do in Westfall"*. `/wcmap` toggles every herb and ore spawn on the world map (`/wcmap ore`, `/wcmap herb`) and controls layers and navigation. Details in [docs/MAP.md](docs/MAP.md).
 
 ### Permissions
 
