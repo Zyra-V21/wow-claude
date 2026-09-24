@@ -195,7 +195,7 @@ function atomicWrite(file, content) {
 
 function resolveClaude() {
   if (cfg.claudePath) return cfg.claudePath;
-  const local = path.join(os.homedir(), '.local', 'bin', 'claude.exe');
+  const local = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   if (fs.existsSync(local)) return local;
   return 'claude';
 }
@@ -550,12 +550,24 @@ function pollSavedVariables() {
   if (job) submit(job);
 }
 
+// Windows: capture.ps1 (GDI). Elsewhere: capture_x11.py (the game runs under Wine on X11).
+function captureCommand() {
+  if (process.platform === 'win32') {
+    return ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'capture.ps1'),
+      '-Cell', String(cap.cellPx), '-Cells', String(cap.cellsPerRow), '-MaxRows', String(cap.maxRows),
+      '-IntervalMs', String(cap.intervalMs), '-ProcessName', cap.processName]];
+  }
+  const args = [path.join(HERE, 'capture_x11.py'),
+    '--cell', String(cap.cellPx), '--cells', String(cap.cellsPerRow), '--max-rows', String(cap.maxRows),
+    '--interval-ms', String(cap.intervalMs), '--process-name', cap.processName];
+  if (cap.windowName) args.push('--window-name', cap.windowName);
+  if (cap.keepComposited) args.push('--keep-composited');
+  return [cap.python || 'python3', args];
+}
+
 function startCapture() {
-  const script = path.join(HERE, 'capture.ps1');
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
-    '-Cell', String(cap.cellPx), '-Cells', String(cap.cellsPerRow), '-MaxRows', String(cap.maxRows),
-    '-IntervalMs', String(cap.intervalMs), '-ProcessName', cap.processName];
-  const ps = spawn('powershell.exe', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [cmd, args] = captureCommand();
+  const ps = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const rl = readline.createInterface({ input: ps.stdout });
   rl.on('line', (line) => {
     let ev;
@@ -570,6 +582,7 @@ function startCapture() {
     }
   });
   ps.stderr.on('data', (d) => log('capture stderr:', String(d).trim().slice(0, 300)));
+  ps.on('error', (err) => log(`capture could not start (${cmd}): ${err.message}`));
   ps.on('close', (code) => {
     log(`capture exited (${code}); restarting in 5 s`);
     setTimeout(startCapture, 5000);

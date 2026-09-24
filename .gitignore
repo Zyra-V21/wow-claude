@@ -12,3 +12,4 @@ tests/tmp/
 # OS / local artifacts
 .DS_Store
 *.zip
+bridge/probe.png

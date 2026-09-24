@@ -1,5 +1,5 @@
 // Round-trip test: the addon's real Codec.lua (run in a Lua VM) -> PNG -> capture.ps1 decoder.
-// Windows only (the decoder is PowerShell). Simulates game rendering with noise and gamma.
+// capture.ps1 on Windows, capture_x11.py elsewhere. Simulates game rendering with noise and gamma.
 'use strict';
 const fengari = require('fengari');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
@@ -8,6 +8,7 @@ const { execFileSync } = require('child_process');
 
 const CODEC = path.join(__dirname, '..', 'addon', 'WoWClaude', 'Codec.lua');
 const CAPTURE = path.join(__dirname, '..', 'bridge', 'capture.ps1');
+const CAPTURE_X11 = path.join(__dirname, '..', 'bridge', 'capture_x11.py');
 const TMP = path.join(__dirname, 'tmp');
 const CELL = 4, CELLS = 200, MAXROWS = 48;
 fs.mkdirSync(TMP, { recursive: true });
@@ -70,7 +71,9 @@ function render(cells, jitter, gamma) {
 }
 
 function decode(file) {
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CAPTURE, '-TestImage', file], { encoding: 'utf8' });
+  const out = process.platform === 'win32'
+    ? execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CAPTURE, '-TestImage', file], { encoding: 'utf8' })
+    : execFileSync('python3', [CAPTURE_X11, '--test-image', file], { encoding: 'utf8' });
   return JSON.parse(out.trim().split('\n').pop());
 }
 

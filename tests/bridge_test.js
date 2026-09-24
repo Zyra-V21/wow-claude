@@ -103,9 +103,15 @@ test('resolveCwd: empty is the default, relative joins it, ~ is home, absolute w
   assert.equal(P.resolveCwd('./realms/', base), path.join(base, 'realms'));
   assert.equal(P.resolveCwd('../other', base), path.resolve(base, '..', 'other'));
   assert.equal(P.resolveCwd('~/x', base), path.join(os.homedir(), 'x'));
-  assert.equal(P.resolveCwd('D:\\elsewhere', base), path.resolve('D:\\elsewhere'));
-  assert.ok(P.sameFolder('C:\\A\\b\\', 'c:/a/B'));
-  assert.ok(!P.sameFolder('C:\\a', 'C:\\a\\b'));
+  if (process.platform === 'win32') {
+    assert.equal(P.resolveCwd('D:\\elsewhere', base), path.resolve('D:\\elsewhere'));
+    assert.ok(P.sameFolder('C:\\A\\b\\', 'c:/a/B'));
+    assert.ok(!P.sameFolder('C:\\a', 'C:\\a\\b'));
+  } else {
+    assert.equal(P.resolveCwd('/elsewhere', base), '/elsewhere');
+    assert.ok(P.sameFolder('/a/b/', '/a/b'));
+    assert.ok(!P.sameFolder('/a/B', '/a/b'));
+  }
 });
 
 test('ruleFor turns denials into prefix rules', () => {

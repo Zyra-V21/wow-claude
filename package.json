@@ -27,7 +27,8 @@
     "start": "node bridge/supervisor.js",
     "slots": "node bridge/install-slots.js",
     "test": "node tests/order_check.js && node --test tests/bridge_test.js tests/restore_test.js tests/addon_test.js && node tests/codec_test.js",
-    "test:live": "node tests/inject_test.js"
+    "test:live": "node tests/inject_test.js",
+    "probe": "python3 bridge/capture_x11.py --probe bridge/probe.png"
   },
   "devDependencies": {
     "fengari": "^0.1.4",
