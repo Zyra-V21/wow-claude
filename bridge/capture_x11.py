@@ -232,7 +232,8 @@ class XWindowAttributes(ctypes.Structure):
 
 
 class XClassHint(ctypes.Structure):
-    _fields_ = [("res_name", ctypes.c_char_p), ("res_class", ctypes.c_char_p)]
+    # Raw pointers: c_char_p would hand back Python copies, and XFree on those crashes.
+    _fields_ = [("res_name", ctypes.c_void_p), ("res_class", ctypes.c_void_p)]
 
 
 X.XOpenDisplay.restype = ctypes.c_void_p
@@ -245,7 +246,7 @@ X.XGetWindowProperty.argtypes = [ctypes.c_void_p, Window, Atom, ctypes.c_long, c
                                  ctypes.POINTER(Atom), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong),
                                  ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_void_p)]
 X.XGetClassHint.argtypes = [ctypes.c_void_p, Window, ctypes.POINTER(XClassHint)]
-X.XFetchName.argtypes = [ctypes.c_void_p, Window, ctypes.POINTER(ctypes.c_char_p)]
+X.XFetchName.argtypes = [ctypes.c_void_p, Window, ctypes.POINTER(ctypes.c_void_p)]
 X.XGetWindowAttributes.argtypes = [ctypes.c_void_p, Window, ctypes.POINTER(XWindowAttributes)]
 X.XTranslateCoordinates.argtypes = [ctypes.c_void_p, Window, Window, ctypes.c_int, ctypes.c_int,
                                     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(Window)]
@@ -305,20 +306,21 @@ def attrs(w):
 
 def window_matches(w):
     if args.window_name:
-        name = ctypes.c_char_p()
+        name = ctypes.c_void_p()
         if X.XFetchName(dpy, w, ctypes.byref(name)) and name.value:
-            hit = args.window_name.lower() in name.value.decode("utf-8", "replace").lower()
-            X.XFree(ctypes.cast(name, ctypes.c_void_p))
+            hit = args.window_name.lower() in ctypes.string_at(name.value).decode("utf-8", "replace").lower()
+            X.XFree(name.value)
             return hit
         return False
     hint = XClassHint()
     if not X.XGetClassHint(dpy, w, ctypes.byref(hint)):
         return False
     want = args.process_name.lower() + ".exe"
-    hit = any((v or b"").decode("utf-8", "replace").lower() == want for v in (hint.res_name, hint.res_class))
-    for v in (hint.res_name, hint.res_class):
-        if v:
-            X.XFree(ctypes.cast(v, ctypes.c_void_p))
+    hit = False
+    for ptr in (hint.res_name, hint.res_class):
+        if ptr:
+            hit = hit or ctypes.string_at(ptr).decode("utf-8", "replace").lower() == want
+            X.XFree(ptr)
     return hit
 
 
