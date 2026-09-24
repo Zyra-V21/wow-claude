@@ -4,6 +4,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-24
+
 This release renames the project from **wow-claude** to **WoW AI** (`wow-ai`) and adds two more agents next to Claude Code. Existing installs: `git pull`, `node setup.js` (it migrates the saved data, removes the old addon and updates `config.json`), then quit and relaunch the game. See "Upgrading from wow-claude" in `docs/INSTALL-WINDOWS.md`.
 
 ### Added
@@ -57,5 +59,6 @@ First public release.
 - `setup.js` installer: finds the client, copies the addon, writes `config.json`, builds the slot pool.
 - Test suite: addon in a Lua VM with a stub client, protocol unit tests, slot-file round trip, codec-to-decoder round trip, and a live inject test.
 
-[Unreleased]: https://github.com/chelinho139/wow-ai/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/chelinho139/wow-ai/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/chelinho139/wow-ai/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/chelinho139/wow-ai/releases/tag/v0.3.0
