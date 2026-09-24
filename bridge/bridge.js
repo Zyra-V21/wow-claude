@@ -1,56 +1,69 @@
 #!/usr/bin/env node
 'use strict';
-// WoW Claude bridge: the half of WoWClaude that lives outside the game.
+// WoW AI bridge: the half of WoWAI that lives outside the game.
 //
 //   OUT  capture.ps1 screen-captures the addon's pixel strip -> one or more
 //        {session, chat, id, cwd, flags, text} records per frame
 //        (fallback: the game's SavedVariables file, written on /reload)
-//   RUN  `claude -p` headless in the chat's folder, streaming progress.
-//        Each chat is its own Claude session; up to maxParallel run at once.
+//   RUN  the chat's agent (Claude Code, Codex or Grok; see agents.js) headless
+//        in the chat's folder, streaming progress. Each chat is its own agent
+//        session; up to maxParallel run at once.
 //   IN   we write the latest reply/status of every chat into every
-//        WoWClaude_S### slot addon (the game loads a fresh one from a timer),
+//        WoWAI_S### slot addon (the game loads a fresh one from a timer),
 //        flip a signal .wav per message, and also write Inbox.lua for the
 //        reload path.
 //
 // Zero npm dependencies. Run with npm start or `node bridge.js`.
 //   --once            handle one pending SavedVariables prompt and exit
 //   --inject "text"   pretend the strip said this and exit when done
+//   --agent <id>      agent for --inject (default: "agent" in config.json)
 //   --project <dir>   default folder for chats that haven't picked one
 //
-// Like `claude` itself, the bridge works in the folder it was started from:
-// `cd my-project && wow-claude` makes my-project the default for every chat
-// that hasn't chosen its own with /wow-claude cd. Started from inside this repo (npm
+// Like the agent CLIs themselves, the bridge works in the folder it was started
+// from: `cd my-project && wow-ai` makes my-project the default for every chat
+// that hasn't chosen its own with /wow-ai cd. Started from inside this repo (npm
 // start), it falls back to defaultCwd in config.json.
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
+const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
 
 const HERE = __dirname;
 const CONFIG_FILE = path.join(HERE, 'config.json');
 const STATE_FILE = path.join(HERE, 'state.json');
 const LOG_FILE = path.join(HERE, 'bridge.log');
+const TMP_DIR = path.join(HERE, 'tmp'); // prompt files for agents that read the prompt from disk
 
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log('wow-claude [--project <dir>] [--once] [--inject "text"]\n\n' +
-    'Runs the WoW Claude bridge. Chats without a folder of their own work in <dir>,\n' +
-    'or in the folder you started it from, or in defaultCwd from bridge/config.json.');
+  console.log('wow-ai [--project <dir>] [--once] [--inject "text" [--agent <id>]]\n\n' +
+    'Runs the WoW AI bridge. Chats without a folder of their own work in <dir>,\n' +
+    'or in the folder you started it from, or in defaultCwd from bridge/config.json.\n' +
+    `Agents: ${A.agentIds().join(', ')} (the default is "agent" in config.json; chats pick with /wow-ai agent).`);
   process.exit(0);
 }
 let cfg;
 try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
 catch (e) {
-  console.error(`Cannot read ${CONFIG_FILE} (${e.message}).\nRun "node setup.js" in the wow-claude folder first.`);
+  console.error(`Cannot read ${CONFIG_FILE} (${e.message}).\nRun "node setup.js" in the wow-ai folder first.`);
   process.exit(2); // the supervisor doesn't restart on 2
 }
 const once = argv.includes('--once');
 const injectIdx = argv.indexOf('--inject');
 const inject = injectIdx >= 0 ? argv[injectIdx + 1] : null;
+const agentIdx = argv.indexOf('--agent');
+const injectAgent = agentIdx >= 0 ? argv[agentIdx + 1] : '';
 const exitWhenIdle = once || inject !== null;
+
+// The agent chats use unless they pick their own (/wow-ai agent, "agent=" flag).
+const DEFAULT_AGENT = A.normalizeAgent(cfg.agent || A.DEFAULT_AGENT);
+if (!DEFAULT_AGENT) {
+  console.error(`"agent": "${cfg.agent}" in ${CONFIG_FILE} is not one of ${A.agentIds().join(', ')}.`);
+  process.exit(2);
+}
 
 // Default folder: --project, else the folder we were started from (unless that is
 // this repo, i.e. npm start), else the configured one.
@@ -62,10 +75,10 @@ function insideRepo(dir) {
 const projectIdx = argv.indexOf('--project');
 const DEFAULT_CWD = path.resolve(
   projectIdx >= 0 && argv[projectIdx + 1] ? argv[projectIdx + 1]
-    : process.env.WOW_CLAUDE_PROJECT ? process.env.WOW_CLAUDE_PROJECT
+    : process.env.WOW_AI_PROJECT ? process.env.WOW_AI_PROJECT
     : !insideRepo(process.cwd()) ? process.cwd()
     : cfg.defaultCwd || process.cwd());
-const DEFAULT_CWD_SOURCE = projectIdx >= 0 ? '--project' : process.env.WOW_CLAUDE_PROJECT ? 'WOW_CLAUDE_PROJECT'
+const DEFAULT_CWD_SOURCE = projectIdx >= 0 ? '--project' : process.env.WOW_AI_PROJECT ? 'WOW_AI_PROJECT'
   : !insideRepo(process.cwd()) ? 'started here' : 'config.json';
 
 const resolveCwd = raw => P.resolveCwd(raw, DEFAULT_CWD);
@@ -82,6 +95,10 @@ function siblingFolders() {
 const SLOTS = cfg.slots || 200;
 const MAX_PARALLEL = cfg.maxParallel || 3;
 const cap = Object.assign({ enabled: true, processName: 'WowB', cellPx: 4, cellsPerRow: 200, maxRows: 48, intervalMs: 250 }, cfg.capture || {});
+// The game-side files. A config.json written for the addon's old name
+// (WoWClaude) still works: the paths are derived from addonDir instead.
+const INBOX_FILE = cfg.inboxFile && !/WoWClaude/.test(cfg.inboxFile) ? cfg.inboxFile : path.join(cfg.addonDir || '', 'WoWAI', 'Inbox.lua');
+const SAVED_VARS = String(cfg.savedVariablesFile || '').replace(/WoWClaude\.lua$/, 'WoWAI.lua');
 
 let state = readJson(STATE_FILE, { lastId: 0, sessions: {}, handled: {} });
 if (!state.handled) state.handled = {};
@@ -119,7 +136,9 @@ function noteMessage(job, role, text) {
   const c = transcripts.chats[job.chat] = transcripts.chats[job.chat] || { id: job.chat, name: '', cwd: job.cwd, messages: [] };
   if (job.name) c.name = job.name;
   if (job.cwd) c.cwd = job.cwd;
-  c.messages.push({ role, text: String(text ?? '').slice(0, 4000), id: job.id, t: Math.floor(Date.now() / 1000) });
+  const m = { role, text: String(text ?? '').slice(0, 4000), id: job.id, t: Math.floor(Date.now() / 1000) };
+  if (role === 'assistant' && job.agent) m.agent = job.agent;
+  c.messages.push(m);
   while (c.messages.length > 200) c.messages.shift();
   c.updated = Date.now();
   saveTranscripts();
@@ -143,7 +162,7 @@ function maybeOfferRestore(job) {
 }
 
 // The player deleted a chat in game. Drop everything we keep for it, so the next
-// restore doesn't bring it back and its id can't resume the old Claude session.
+// restore doesn't bring it back and its id can't resume the old agent session.
 function forgetChat(job) {
   if (!job.chat) return;
   const had = !!transcripts.chats[job.chat];
@@ -152,6 +171,7 @@ function forgetChat(job) {
   delete state.sessions[sessKey(job)];
   delete state.sessions[chatKey(job)];
   if (state.sessionCwd) delete state.sessionCwd[sessKey(job)];
+  if (state.sessionAgent) delete state.sessionAgent[sessKey(job)];
   if (pendingRestore) pendingRestore.chats = pendingRestore.chats.filter(c => c.id !== job.chat);
   saveTranscripts();
   log(`#${job.id}${job.session ? '@' + job.session : ''} forgot chat ${job.chat}${had ? '' : ' (nothing stored)'}`);
@@ -182,7 +202,7 @@ function log(...parts) {
   try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch {}
 }
 
-const { pad3, chatKey, sessKey, luaStr, SILENT_WAV, jobsFromStrip, ruleFor, describeToolUse } = P;
+const { pad3, chatKey, sessKey, SILENT_WAV, jobsFromStrip } = P;
 const slotNumber = id => P.slotNumber(id, SLOTS);
 const alreadyHandled = job => P.alreadyHandled(state, job);
 const markHandled = job => P.markHandled(state, job);
@@ -193,11 +213,17 @@ function atomicWrite(file, content) {
   fs.renameSync(tmp, file);
 }
 
-function resolveClaude() {
-  if (cfg.claudePath) return cfg.claudePath;
-  const local = path.join(os.homedir(), '.local', 'bin', 'claude.exe');
-  if (fs.existsSync(local)) return local;
-  return 'claude';
+// Stop a run and whatever it spawned (an npm launcher runs the real binary as a
+// child of its own; on Windows a plain kill would leave that one going).
+function killTree(child) {
+  if (process.platform === 'win32') {
+    try {
+      const k = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      k.on('error', () => { try { child.kill(); } catch {} });
+      return;
+    } catch {}
+  }
+  try { child.kill(); } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -206,38 +232,38 @@ function resolveClaude() {
 
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records) {
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds() });
 }
 
 function addonInstalled() {
-  return fs.existsSync(path.join(cfg.addonDir, 'WoWClaude', 'WoWClaude.toc'));
+  return fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'WoWAI.toc'));
 }
 
 function slotsInstalled() {
-  return fs.existsSync(path.join(cfg.addonDir, 'WoWClaude_S001', 'Inbox.lua'));
+  return fs.existsSync(path.join(cfg.addonDir, 'WoWAI_S001', 'Inbox.lua'));
 }
 
 // The game will load *some* unused slot next, so every slot gets the full picture.
 // A missing addon folder (not installed yet, or the game folder moved) must not
-// take the bridge down: capture and Claude runs keep working, and the game just
+// take the bridge down: capture and agent runs keep working, and the game just
 // won't see replies until `node setup.js` has run and WoW was restarted.
 let warnedNoAddon = false;
 function publishNow() {
   lastPublish = Date.now();
   const records = [...live.values()].slice(-30);
   try {
-    atomicWrite(cfg.inboxFile, slotFile('WoWClaude_Inbox', records));
+    atomicWrite(INBOX_FILE, slotFile('WoWAI_Inbox', records));
   } catch (e) {
     if (!warnedNoAddon) {
       warnedNoAddon = true;
-      log(`publish: cannot write ${cfg.inboxFile} (${e.code || e.message}); addon not installed? run: node setup.js, then restart WoW`);
+      log(`publish: cannot write ${INBOX_FILE} (${e.code || e.message}); addon not installed? run: node setup.js, then restart WoW`);
     }
     return;
   }
   if (!slotsInstalled()) return;
-  const body = slotFile('WoWClaude_SlotData', records);
+  const body = slotFile('WoWAI_SlotData', records);
   for (let i = 1; i <= SLOTS; i++) {
-    try { atomicWrite(path.join(cfg.addonDir, 'WoWClaude_S' + pad3(i), 'Inbox.lua'), body); } catch {}
+    try { atomicWrite(path.join(cfg.addonDir, 'WoWAI_S' + pad3(i), 'Inbox.lua'), body); } catch {}
   }
   // The restore bundle is large; it rides along once and is then dropped.
   // (The game keeps loading fresh slots until it has read one carrying it.)
@@ -245,7 +271,7 @@ function publishNow() {
 }
 
 // Final results publish immediately; progress is throttled. `key` is the chat
-// (record.session is Claude's session id, a different thing).
+// (record.session is the agent's session id, a different thing).
 function publish(key, record, urgent) {
   live.set(key, record);
   if (urgent) { if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; } publishNow(); return; }
@@ -255,7 +281,7 @@ function publish(key, record, urgent) {
 }
 
 function signal(kind, id, on) {
-  const file = path.join(cfg.addonDir, 'WoWClaude', kind, pad3(slotNumber(id)) + '.wav');
+  const file = path.join(cfg.addonDir, 'WoWAI', kind, pad3(slotNumber(id)) + '.wav');
   try { atomicWrite(file, on ? SILENT_WAV : Buffer.alloc(0)); } catch {}
 }
 
@@ -264,7 +290,7 @@ function signal(kind, id, on) {
 // without spending a reply slot.
 const ACT_MAX = cfg.actMax || 60;
 function actFile(id, k) {
-  return path.join(cfg.addonDir, 'WoWClaude', 'act', pad3(slotNumber(id)), String(k).padStart(2, '0') + '.wav');
+  return path.join(cfg.addonDir, 'WoWAI', 'act', pad3(slotNumber(id)), String(k).padStart(2, '0') + '.wav');
 }
 function resetBeats(id) {
   for (let k = 1; k <= ACT_MAX; k++) { try { atomicWrite(actFile(id, k), Buffer.alloc(0)); } catch {} }
@@ -281,10 +307,10 @@ function beat(job) {
 // files just ahead of the counter are kept empty so the game can't run ahead.
 const PRESENCE_MAX = cfg.presenceMax || 2000;
 function presenceFile(k) {
-  return path.join(cfg.addonDir, 'WoWClaude', 'presence', String(k).padStart(4, '0') + '.wav');
+  return path.join(cfg.addonDir, 'WoWAI', 'presence', String(k).padStart(4, '0') + '.wav');
 }
 function presenceBeat() {
-  if (!fs.existsSync(path.join(cfg.addonDir, 'WoWClaude', 'presence'))) return;
+  if (!fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'presence'))) return;
   state.presence = ((state.presence || 0) % PRESENCE_MAX) + 1;
   const k = state.presence;
   try { atomicWrite(presenceFile(k), SILENT_WAV); } catch {}
@@ -302,14 +328,14 @@ function presenceBeat() {
 // The reload path: the addon writes its outbox into SavedVariables on /reload.
 function readOutbox() {
   let src;
-  try { src = fs.readFileSync(cfg.savedVariablesFile, 'utf8'); } catch { return null; }
+  try { src = fs.readFileSync(SAVED_VARS, 'utf8'); } catch { return null; }
   return P.parseOutbox(src);
 }
 
 // The addon sends the player's in-game context (character, location, ...) with
 // its hello and again whenever it changes; an empty one means "context off".
 // It is kept in state.json so a restarted bridge still has it, and goes into
-// Claude's system prompt on every run (see protocol.systemPrompt).
+// the agent's system prompt on every run (see protocol.systemPrompt).
 function setContext(job) {
   const text = String(job.ctx || '').replace(/\r/g, '').trim().slice(0, 2000);
   const prev = (state.context && state.context.text) || '';
@@ -339,29 +365,35 @@ function primer() {
   }
 }
 
-// Persist newly allowed rules so they stick across bridge restarts.
-function allowRules(rules) {
-  const current = new Set(cfg.allowedTools || []);
+// Persist newly allowed rules for an agent so they stick across bridge restarts.
+// They go under agents.<id>.allowedTools; a config.json from before agents
+// existed keeps Claude's list at the top level, which moves down on first write.
+function allowRules(agentId, rules) {
+  const current = new Set(A.agentConfig(cfg, agentId).allowedTools || []);
   const added = rules.filter(r => r && !current.has(r));
   if (!added.length) return [];
-  cfg.allowedTools = [...current, ...added];
+  const list = [...current, ...added];
+  cfg.agents = cfg.agents || {};
+  cfg.agents[agentId] = { ...(cfg.agents[agentId] || {}), allowedTools: list };
   try {
     const onDisk = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    onDisk.allowedTools = cfg.allowedTools;
+    onDisk.agents = onDisk.agents || {};
+    onDisk.agents[agentId] = { ...(onDisk.agents[agentId] || {}), allowedTools: list };
+    if (agentId === 'claude') delete onDisk.allowedTools;
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(onDisk, null, 2) + '\n');
   } catch (e) { log('could not save config.json:', e.message); }
   return added;
 }
 
 // ---------------------------------------------------------------------------
-// Running Claude
+// Running an agent
 // ---------------------------------------------------------------------------
 
 function submit(job) {
   if (alreadyHandled(job)) return;
   if (job.ctx !== undefined) setContext(job);
   if (job.forget) {
-    // A deleted chat: forget it and ack. No Claude run.
+    // A deleted chat: forget it and ack. No agent run.
     markHandled(job);
     forgetChat(job);
     saveState();
@@ -370,7 +402,7 @@ function submit(job) {
   }
   if (job.hello) {
     // The addon announcing itself: ack, offer a restore if its data is fresh,
-    // and refresh the slots so it can read our clock. No Claude run.
+    // and refresh the slots so it can read our clock. No agent run.
     markHandled(job);
     saveState();
     signal('ack', job.id, true);
@@ -415,47 +447,72 @@ function runJob(job) {
     finish(job, 'error', `Folder does not exist: ${cwd}\n` +
       `Paths are relative to ${DEFAULT_CWD}.` +
       (sibs.length ? `\nFolders there: ${sibs.join(', ')}` : '') +
-      `\nUse /wow-claude cd <folder> to pick one, or /wow-claude cd alone for the default.`);
+      `\nUse /wow-ai cd <folder> to pick one, or /wow-ai cd alone for the default.`);
+    return;
+  }
+  // Which agent: the chat's own (an "agent=" flag), else the bridge's default.
+  const agentId = job.agent ? A.normalizeAgent(job.agent) : DEFAULT_AGENT;
+  if (!agentId) {
+    log(`${tag} unknown agent "${job.agent}"`);
+    finish(job, 'error', `Unknown agent "${job.agent}". This bridge knows: ${A.agentIds().join(', ')}.\n` +
+      `Use /wow-ai agent <name> to pick one, or /wow-ai agent alone for the default (${DEFAULT_AGENT}).`);
+    return;
+  }
+  job.agent = agentId;
+  const agent = A.AGENTS[agentId];
+  const acfg = A.agentConfig(cfg, agentId);
+  const cmd = A.resolveCommand(agentId, acfg);
+  if (!cmd.found) {
+    log(`${tag} ${agentId} not found: ${cmd.note}`);
+    finish(job, 'error', `${agent.name} is not installed on the bridge PC: ${cmd.note}.`);
     return;
   }
   const skey = sessKey(job);
   if (job.newSession) { delete state.sessions[skey]; delete state.sessions[key]; }
-  // Claude keeps sessions per project folder, so a session can't follow a chat
-  // into another folder: start fresh there.
+  // Agents keep sessions per project folder, and a session belongs to the agent
+  // that made it, so a chat that changes either starts fresh.
   const prevCwd = state.sessionCwd && state.sessionCwd[skey];
   if (prevCwd && !sameFolder(prevCwd, cwd) && state.sessions[skey]) {
     log(`${tag} folder changed (${prevCwd} -> ${cwd}): new session`);
     delete state.sessions[skey]; delete state.sessions[key];
   }
+  const prevAgent = (state.sessionAgent && state.sessionAgent[skey]) || 'claude';
+  if (prevAgent !== agentId && state.sessions[skey]) {
+    log(`${tag} agent changed (${prevAgent} -> ${agentId}): new session`);
+    delete state.sessions[skey]; delete state.sessions[key];
+  }
   if (Array.isArray(job.allow) && job.allow.length) {
-    const added = allowRules(job.allow);
-    log(`${tag} allowed: ${job.allow.join(', ')}${added.length ? '' : ' (already allowed)'}`);
+    const added = allowRules(agentId, job.allow);
+    log(`${tag} allowed for ${agentId}: ${job.allow.join(', ')}${added.length ? '' : ' (already allowed)'}`);
   }
   maybeOfferRestore(job);
   noteMessage(job, 'user', job.text);
   const resume = state.sessions[skey] || state.sessions[key];
 
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', cfg.permissionMode || 'acceptEdits'];
-  if (Array.isArray(cfg.allowedTools) && cfg.allowedTools.length) args.push('--allowedTools', ...cfg.allowedTools);
-  if (cfg.model) args.push('--model', cfg.model);
-  if (resume) args.push('--resume', resume);
-  const sys = P.systemPrompt(gameContext(), primer());
-  if (sys) args.push('--append-system-prompt', sys);
+  const ctx = gameContext();
+  const system = P.systemPrompt(ctx, primer());
+  const systemShort = P.systemPrompt(ctx, '');
+  const promptFile = path.join(TMP_DIR, `prompt-${job.id}-${Date.now().toString(36)}.txt`);
+  const input = agent.input({ prompt: job.text, system, systemShort, resume });
+  if (input.promptFile !== undefined) {
+    try { fs.mkdirSync(TMP_DIR, { recursive: true }); fs.writeFileSync(promptFile, input.promptFile); }
+    catch (e) { finish(job, 'error', `Could not write the prompt file ${promptFile}: ${e.message}`); return; }
+  }
+  const args = [...cmd.args, ...agent.args({ cfg: acfg, resume, cwd, system, systemShort, promptFile })];
+  const env = agent.env({ ...process.env });
 
-  const env = { ...process.env };
-  delete env.CLAUDECODE;
-
-  log(`${tag} (${job.via}) starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${sys ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
-  const child = spawn(resolveClaude(), args, { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${system ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
+  const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   running.set(key, { job, child });
-  publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume }, true);
-  child.stdin.end(job.text);
+  publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
+  if (input.stdin !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(input.stdin); }
 
+  const parser = agent.parser();
   const progress = [];
   let sessionId = resume || '';
-  let resultText = null;
-  let isError = false;
-  let denied = [];
+  let result = null;       // { text, error } once the agent has produced its reply
+  const denied = new Set(); // allowlist rules the run was refused (Claude syntax)
+  const notes = [];        // bridge remarks appended to the reply
   let stderr = '';
   let buffer = '';
 
@@ -463,30 +520,21 @@ function runJob(job) {
     progress.push(line);
     while (progress.length > 10) progress.shift();
     beat(job);
-    publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId }, false);
+    publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId }, false);
   };
   // Long thinking stretches produce no tool events; keep the heartbeat alive anyway.
   const keepalive = setInterval(() => beat(job), 45000);
 
-  const handleEvent = (ev) => {
-    if (ev.session_id) sessionId = ev.session_id;
-    if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
-      for (const block of ev.message.content) {
-        if (block.type === 'tool_use') pushProgress(describeToolUse(block));
-        else if (block.type === 'text' && block.text && block.text.trim()) {
-          const snippet = block.text.trim().replace(/\s+/g, ' ');
-          pushProgress(snippet.length > 140 ? snippet.slice(0, 140) + '...' : snippet);
-        }
-      }
-    } else if (ev.type === 'result') {
-      isError = !!ev.is_error;
-      resultText = typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result ?? '', null, 2);
-      if (Array.isArray(ev.permission_denials) && ev.permission_denials.length) {
-        denied = [...new Set(ev.permission_denials.map(ruleFor))];
-        const list = ev.permission_denials.map(d => d.tool_name + (d.tool_input && d.tool_input.command ? ': ' + d.tool_input.command : '')).join('\n  ');
-        resultText += `\n\n[bridge] Claude needed ${ev.permission_denials.length} action(s) that aren't allowed yet:\n  ${list}\nUse the Allow button below to permit them and let it continue.`;
-      }
-    }
+  const handleLine = (line) => {
+    let ev;
+    try { ev = JSON.parse(line); } catch { return; }
+    if (!ev || typeof ev !== 'object') return;
+    const r = parser.feed(ev);
+    if (r.session) sessionId = r.session;
+    for (const p of r.progress) pushProgress(p);
+    for (const d of r.denied) denied.add(d);
+    notes.push(...r.notes);
+    if (r.done) result = r.done;
   };
 
   child.stdout.on('data', (chunk) => {
@@ -495,31 +543,44 @@ function runJob(job) {
     while ((nl = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, nl).trim();
       buffer = buffer.slice(nl + 1);
-      if (!line) continue;
-      try { handleEvent(JSON.parse(line)); } catch {}
+      if (line) handleLine(line);
     }
   });
   child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
 
   const timer = setTimeout(() => {
     log(`${tag} timed out after ${cfg.timeoutMs} ms, killing`);
-    child.kill();
+    killTree(child);
   }, cfg.timeoutMs || 1800000);
 
-  child.on('error', (err) => {
+  const cleanup = () => {
     clearTimeout(timer);
     clearInterval(keepalive);
-    finish(job, 'error', `Could not start claude: ${err.message}\nSet "claudePath" in config.json.`);
+    if (input.promptFile !== undefined) { try { fs.unlinkSync(promptFile); } catch {} }
+  };
+
+  child.on('error', (err) => {
+    cleanup();
+    finish(job, 'error', `Could not start ${agent.name} (${cmd.file}): ${err.message}\nSet agents.${agentId}.path in config.json.`);
   });
 
   child.on('close', (code) => {
-    clearTimeout(timer);
-    clearInterval(keepalive);
-    if (buffer.trim()) { try { handleEvent(JSON.parse(buffer.trim())); } catch {} }
-    if (sessionId) { state.sessions[skey] = sessionId; (state.sessionCwd = state.sessionCwd || {})[skey] = cwd; }
-    if (resultText !== null && !isError) finish(job, 'done', resultText, sessionId, denied);
-    else if (resultText !== null) finish(job, 'error', resultText, sessionId, denied);
-    else finish(job, 'error', `claude exited with code ${code} and no result.\n${stderr.trim().slice(-1500)}`, sessionId);
+    cleanup();
+    if (buffer.trim()) handleLine(buffer.trim());
+    if (sessionId) {
+      state.sessions[skey] = sessionId;
+      (state.sessionCwd = state.sessionCwd || {})[skey] = cwd;
+      (state.sessionAgent = state.sessionAgent || {})[skey] = agentId;
+    }
+    const extra = notes.length ? `\n\n[bridge] ${notes.join('\n\n[bridge] ')}` : '';
+    if (result && !result.error) {
+      const body = String(result.text || '').trim() || (notes.length ? '' : `(${agent.name} finished without a reply)`);
+      finish(job, 'done', (body + extra).trim(), sessionId, [...denied]);
+    } else if (result) {
+      finish(job, 'error', (String(result.text || '') + extra).trim(), sessionId, [...denied]);
+    } else {
+      finish(job, 'error', `${agent.name} exited with code ${code} and no result.\n${stderr.trim().slice(-1500)}`, sessionId);
+    }
   });
 }
 
@@ -529,8 +590,8 @@ function finish(job, status, text, session, denied) {
   running.delete(chatKey(job));
   markHandled(job);
   saveState();
-  noteMessage(job, status === 'done' ? 'claude' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
-  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, cwd: job.cwd, session, denied }, true);
+  noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
+  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, cwd: job.cwd, session, denied, agent: job.agent || '' }, true);
   signal('sig', job.id, true);
   log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars)`);
   drainQueue();
@@ -543,7 +604,7 @@ function finish(job, status, text, session, denied) {
 
 function pollSavedVariables() {
   let st;
-  try { st = fs.statSync(cfg.savedVariablesFile); } catch { return; }
+  try { st = fs.statSync(SAVED_VARS); } catch { return; }
   if (st.mtimeMs === lastMtime) return;
   lastMtime = st.mtimeMs;
   const job = readOutbox();
@@ -576,27 +637,36 @@ function startCapture() {
   });
 }
 
+function agentLine(id) {
+  const acfg = A.agentConfig(cfg, id);
+  const cmd = A.resolveCommand(id, acfg);
+  if (!cmd.found) return `not found - ${cmd.note}`;
+  const where = cmd.args.length ? `${cmd.file} ${cmd.args.join(' ')}` : cmd.file;
+  const rules = Array.isArray(acfg.allowedTools) ? acfg.allowedTools.length : 0;
+  return `${where}  [${acfg.permissionMode || 'acceptEdits'}${id === 'codex' ? '' : ', ' + rules + ' allowed tool rules'}${acfg.model ? ', model ' + acfg.model : ''}]`;
+}
+
 function banner() {
-  console.log('WoW Claude bridge');
-  console.log(`  folder   : ${DEFAULT_CWD}  (${DEFAULT_CWD_SOURCE}; chats can override with /wow-claude cd)`);
+  console.log('WoW AI bridge');
+  console.log(`  folder   : ${DEFAULT_CWD}  (${DEFAULT_CWD_SOURCE}; chats can override with /wow-ai cd)`);
   console.log(`  addons   : ${cfg.addonDir}`);
   console.log(`  addon    : ${addonInstalled() ? 'installed' : 'NOT INSTALLED - run: node setup.js, then restart WoW'}`);
   console.log(`  slots    : ${slotsInstalled() ? SLOTS + ' installed' : 'NOT INSTALLED - run: node setup.js (or node bridge/install-slots.js), then restart WoW'}`);
   console.log(`  capture  : ${cap.enabled ? 'on (' + cap.processName + ', ' + cap.cellsPerRow + 'x' + cap.maxRows + ' cells of ' + cap.cellPx + 'px)' : 'off'}`);
   console.log(`  parallel : up to ${MAX_PARALLEL} chats at once`);
-  console.log(`  fallback : ${cfg.savedVariablesFile}`);
-  console.log(`  claude   : ${resolveClaude()}`);
-  console.log(`  mode     : ${cfg.permissionMode}, ${(cfg.allowedTools || []).length} allowed tool rules`);
+  console.log(`  fallback : ${SAVED_VARS}`);
+  console.log(`  agent    : ${DEFAULT_AGENT} (default; chats pick their own with /wow-ai agent)`);
+  for (const id of A.agentIds()) console.log(`  ${id.padEnd(9)}: ${agentLine(id)}`);
   console.log(`  sessions : ${Object.keys(state.sessions).length} saved`);
   const ctx = gameContext();
-  console.log(`  context  : ${cfg.gameContext === false ? 'off (gameContext in config.json)' : ctx ? (ctx.split('\n').find(l => /^Character:/i.test(l)) || ctx.split('\n')[0]).slice(0, 100) : 'none yet (the addon sends it with its hello; /wow-claude context in game)'}`);
+  console.log(`  context  : ${cfg.gameContext === false ? 'off (gameContext in config.json)' : ctx ? (ctx.split('\n').find(l => /^Character:/i.test(l)) || ctx.split('\n')[0]).slice(0, 100) : 'none yet (the addon sends it with its hello; /wow-ai context in game)'}`);
   console.log(`  primer   : ${!PRIMER_FILE ? 'off (primerFile in config.json)' : primer() ? path.resolve(REPO, PRIMER_FILE) + ' (' + primer().length + ' chars, with the context)' : 'NOT FOUND: ' + path.resolve(REPO, PRIMER_FILE)}`);
   console.log('Leave this window open while you play. Ctrl+C to stop.\n');
 }
 
 banner();
 if (inject !== null) {
-  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject' });
+  submit({ id: state.lastId + 1, session: '', chat: '', text: inject, cwd: '', newSession: false, via: 'inject', agent: injectAgent || '' });
 } else {
   pollSavedVariables();
   if (once) {

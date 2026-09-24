@@ -35,32 +35,39 @@ function readSlot(src, globalName) {
   return value(assign.init[0]);
 }
 
-test('slot file round-trips replies, denied rules, cwd and a restore bundle', () => {
+test('slot file round-trips replies, denied rules, cwd, agents and a restore bundle', () => {
   const restore = {
     token: 'tok1',
     chats: [{ id: 'c1', name: 'realms', cwd: 'C:\\x\\y', messages: [
       { role: 'user', id: 1, t: 1, text: 'hi "there"\nnew line' },
-      { role: 'claude', id: 1, t: 2, text: 'hello | pipe \\ backslash' },
+      { role: 'assistant', id: 1, t: 2, agent: 'codex', text: 'hello | pipe \\ backslash' },
     ] }],
   };
-  const lua = P.luaTable('WoWClaude_SlotData',
-    [{ chat: 'c9', id: 3, status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'] }],
-    { cwd: 'C:\\proj', restore, now: 1700000000123 });
-  const d = readSlot(lua, 'WoWClaude_SlotData');
+  const lua = P.luaTable('WoWAI_SlotData',
+    [{ chat: 'c9', id: 3, status: 'done', text: 'ok\ttab', denied: ['WebSearch', 'Bash(cargo:*)'], agent: 'grok' }],
+    { cwd: 'C:\\proj', restore, now: 1700000000123, agent: 'claude', agents: ['claude', 'codex', 'grok'] });
+  const d = readSlot(lua, 'WoWAI_SlotData');
   assert.equal(d.now, 1700000000);
   assert.equal(d.cwd, 'C:\\proj');
+  assert.equal(d.agent, 'claude');
+  assert.deepEqual(d.agents, ['claude', 'codex', 'grok']);
   assert.equal(d.replies.length, 1);
   assert.deepEqual(d.replies[0].denied, ['WebSearch', 'Bash(cargo:*)']);
   assert.equal(d.replies[0].text, 'ok\ttab');
+  assert.equal(d.replies[0].agent, 'grok');
   assert.equal(d.restore.token, 'tok1');
   assert.equal(d.restore.chats.length, 1);
   assert.equal(d.restore.chats[0].messages[0].text, 'hi "there"\nnew line');
+  assert.equal(d.restore.chats[0].messages[0].agent, '');
   assert.equal(d.restore.chats[0].messages[1].text, 'hello | pipe \\ backslash');
+  assert.equal(d.restore.chats[0].messages[1].agent, 'codex');
 });
 
 test('slot file without a restore has no restore field and tolerates empty records', () => {
-  const d = readSlot(P.luaTable('WoWClaude_Inbox', [], { cwd: '' }), 'WoWClaude_Inbox');
+  const d = readSlot(P.luaTable('WoWAI_Inbox', [], { cwd: '' }), 'WoWAI_Inbox');
   assert.equal(d.cwd, '');
+  assert.equal(d.agent, '');
+  assert.deepEqual(d.agents, {}); // an empty Lua table
   assert.equal(d.restore, undefined);
-  assert.deepEqual(d.replies, {}); // an empty Lua table
+  assert.deepEqual(d.replies, {});
 });
