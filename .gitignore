@@ -3,6 +3,7 @@ bridge/config.json
 bridge/state.json
 bridge/transcripts.json
 bridge/bridge.log
+bridge/tmp/
 *.tmp
 
 # tooling

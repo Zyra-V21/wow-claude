@@ -17,7 +17,7 @@ function slotNumber(id, slots) { return ((id - 1) % slots) + 1; }
 
 // A chat as the bridge tracks it: the addon's session token plus the chat id.
 function chatKey(job) { return `${job.session || ''}:${job.chat || 'default'}`; }
-// Claude sessions are keyed by chat id alone, which survives an addon data reset.
+// Agent sessions are keyed by chat id alone, which survives an addon data reset.
 function sessKey(job) { return job.chat ? 'chat:' + job.chat : chatKey(job); }
 
 // ---------------------------------------------------------------------------
@@ -83,19 +83,21 @@ function sameFolder(a, b) {
 // In: what the game sends
 // ---------------------------------------------------------------------------
 
-// Flags field: ';'-separated tokens. "n" = fresh Claude session, "h" = hello
+// Flags field: ';'-separated tokens. "n" = fresh agent session, "h" = hello
 // (no prompt), "d" = the player deleted this chat: forget its transcript and
 // session (no prompt), "allow=Rule1,Rule2" = add these permission rules before
 // running, "c" = the record carries a game-context field before the text (an
-// empty one clears the context the bridge keeps).
+// empty one clears the context the bridge keeps), "agent=codex" = run this
+// chat with that agent instead of the bridge's default (see agents.js).
 function parseFlags(flags) {
-  const out = { newSession: false, hello: false, forget: false, context: false, allow: [] };
+  const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
   for (const tok of String(flags || '').split(';')) {
     if (tok === 'n') out.newSession = true;
     else if (tok === 'h') out.hello = true;
     else if (tok === 'd') out.forget = true;
     else if (tok === 'c') out.context = true;
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
+    else if (tok.startsWith('agent=')) out.agent = tok.slice(6).trim().toLowerCase();
   }
   return out;
 }
@@ -140,6 +142,8 @@ function parseOutbox(src) {
   const job = { id, session, chat, text, cwd, newSession, via: 'reload' };
   const ctx = b.match(/\["ctx"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (ctx) job.ctx = fromHex(ctx[1]);
+  const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
+  if (agent && agent[1]) job.agent = agent[1].toLowerCase();
   return job;
 }
 
@@ -147,18 +151,20 @@ function parseOutbox(src) {
 // Game context
 // ---------------------------------------------------------------------------
 
-// What Claude is told about where the message comes from, appended to its
+// What the agent is told about where the message comes from, appended to its
 // system prompt on every run while the addon has sent a context (the player's
-// character, location and so on; see GameContext in WoWClaude.lua), plus the
+// character, location and so on; see GameContext in WoWAI.lua), plus the
 // addon/macro primer (docs/WOW-ADDON-PRIMER.md) so it can write for this
 // client whatever folder the chat works in. Empty context = nothing appended,
 // primer included, so a bridge used for unrelated projects, or an addon with
-// `/wow-claude context off`, leaves Claude exactly as it was.
+// `/wow-ai context off`, leaves the agent exactly as it was. Claude and Grok
+// take this as a system prompt; for Codex, agents.js puts it at the top of
+// the prompt.
 function systemPrompt(ctx, primer) {
   const text = String(ctx || '').trim();
   if (!text) return '';
   const lines = [
-    'The user is talking to you from inside World of Warcraft through the wow-claude addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
+    'The user is talking to you from inside World of Warcraft through the wow-ai addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
     '',
     'Their in-game situation when the message was written, as reported by the addon:',
     text,
@@ -176,7 +182,9 @@ function systemPrompt(ctx, primer) {
 // Permissions and progress
 // ---------------------------------------------------------------------------
 
-// Turn a permission denial into an allowlist rule the user can accept.
+// Turn a permission denial (Claude's shape: tool_name, tool_input) into an
+// allowlist rule the user can accept. Rules are in Claude Code's syntax for
+// every agent; agents.js translates where an agent's own syntax differs.
 function ruleFor(d) {
   const name = d.tool_name || 'Unknown';
   if (name === 'Bash') {
@@ -188,7 +196,8 @@ function ruleFor(d) {
   return name;
 }
 
-// One progress line per tool call, as shown in the game's "working" bubble.
+// One progress line per Claude tool call, as shown in the game's "working"
+// bubble (Codex and Grok have their own in agents.js).
 function describeToolUse(block) {
   const inp = block.input || {};
   switch (block.name) {
@@ -221,15 +230,19 @@ function luaStr(s) {
 }
 
 // The slot file / Inbox.lua body: the latest record of every chat, the bridge's
-// clock and default folder, and (right after a saved-data reset) a restore bundle.
+// clock, default folder and default agent (plus the agents it knows), and
+// (right after a saved-data reset) a restore bundle.
 function luaTable(globalName, records, opts = {}) {
   const now = opts.now || Date.now();
+  const agents = Array.isArray(opts.agents) ? opts.agents : [];
   const lines = [
-    '-- Written by the wow-claude bridge (bridge/bridge.js). Do not edit by hand.',
+    '-- Written by the wow-ai bridge (bridge/bridge.js). Do not edit by hand.',
     `${globalName} = {`,
     `\tts = ${luaStr(new Date(now).toISOString())},`,
     `\tnow = ${Math.floor(now / 1000)},`,
     `\tcwd = ${luaStr(opts.cwd || '')},`,
+    `\tagent = ${luaStr(opts.agent || '')},`,
+    `\tagents = { ${agents.map(luaStr).join(', ')} },`,
     '\treplies = {',
   ];
   for (const r of records) {
@@ -240,6 +253,7 @@ function luaTable(globalName, records, opts = {}) {
     lines.push(`\t\t\ttext = ${luaStr(r.text)},`);
     lines.push(`\t\t\tcwd = ${luaStr(r.cwd || '')},`);
     lines.push(`\t\t\tsession = ${luaStr(r.session || '')},`);
+    lines.push(`\t\t\tagent = ${luaStr(r.agent || '')},`);
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
@@ -252,7 +266,7 @@ function luaTable(globalName, records, opts = {}) {
     for (const c of restore.chats) {
       lines.push('\t\t\t{', `\t\t\t\tid = ${luaStr(c.id)},`, `\t\t\t\tname = ${luaStr(c.name)},`, `\t\t\t\tcwd = ${luaStr(c.cwd)},`, '\t\t\t\tmessages = {');
       for (const m of c.messages) {
-        lines.push(`\t\t\t\t\t{ role = ${luaStr(m.role)}, id = ${Number(m.id) || 0}, t = ${Number(m.t) || 0}, text = ${luaStr(m.text)} },`);
+        lines.push(`\t\t\t\t\t{ role = ${luaStr(m.role)}, id = ${Number(m.id) || 0}, t = ${Number(m.t) || 0}, agent = ${luaStr(m.agent || '')}, text = ${luaStr(m.text)} },`);
       }
       lines.push('\t\t\t\t},', '\t\t\t},');
     }
