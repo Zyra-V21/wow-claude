@@ -122,7 +122,7 @@ if (P.pruneStale(state, transcripts)) { saveState(); saveTranscripts(); }
 let pendingRestore = null;
 
 function saveTranscripts() {
-  try { fs.writeFileSync(TRANSCRIPT_FILE, JSON.stringify(transcripts)); } catch (e) { log('could not save transcripts:', e.message); }
+  try { atomicWrite(TRANSCRIPT_FILE, JSON.stringify(transcripts)); } catch (e) { log('could not save transcripts:', e.message); }
 }
 
 // Chats the player deleted in game while a run for them was still going: the
@@ -193,7 +193,7 @@ function readJson(file, fallback) {
 }
 
 function saveState() {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  atomicWrite(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 function log(...parts) {
@@ -380,7 +380,7 @@ function allowRules(agentId, rules) {
     onDisk.agents = onDisk.agents || {};
     onDisk.agents[agentId] = { ...(onDisk.agents[agentId] || {}), allowedTools: list };
     if (agentId === 'claude') delete onDisk.allowedTools;
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(onDisk, null, 2) + '\n');
+    atomicWrite(CONFIG_FILE, JSON.stringify(onDisk, null, 2) + '\n');
   } catch (e) { log('could not save config.json:', e.message); }
   return added;
 }
@@ -515,6 +515,7 @@ function runJob(job) {
   const notes = [];        // bridge remarks appended to the reply
   let stderr = '';
   let buffer = '';
+  let parserError = false;
 
   const pushProgress = (line) => {
     progress.push(line);
@@ -526,10 +527,24 @@ function runJob(job) {
   const keepalive = setInterval(() => beat(job), 45000);
 
   const handleLine = (line) => {
+    if (parserError) return;
     let ev;
     try { ev = JSON.parse(line); } catch { return; }
     if (!ev || typeof ev !== 'object') return;
-    const r = parser.feed(ev);
+    let r;
+    try {
+      r = parser.feed(ev);
+      if (!r || !Array.isArray(r.progress) || !Array.isArray(r.denied) || !Array.isArray(r.notes)) {
+        throw new Error('agent parser returned an invalid event result');
+      }
+    } catch (err) {
+      parserError = true;
+      const detail = err instanceof Error ? err.message : String(err);
+      result = { text: `${agent.name} returned an unreadable event.`, error: true };
+      notes.push(`${agent.name} event parser failed: ${detail}`);
+      log(`${tag} parser error: ${err && err.stack ? err.stack : detail}`);
+      return;
+    }
     if (r.session) sessionId = r.session;
     for (const p of r.progress) pushProgress(p);
     for (const d of r.denied) denied.add(d);

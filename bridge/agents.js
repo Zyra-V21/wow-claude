@@ -15,7 +15,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { describeToolUse, ruleFor } = require('./protocol');
+const { describeToolUse, ruleFor, baseName } = require('./protocol');
 
 const PROGRESS_CHARS = 140;
 
@@ -97,7 +97,7 @@ function codexItemLine(item) {
       const changes = Array.isArray(item.changes) ? item.changes : [];
       const kinds = new Set(changes.map(c => c.kind));
       const verb = kinds.size === 1 ? ({ add: 'write', delete: 'delete', update: 'edit' })[[...kinds][0]] || 'edit' : 'edit';
-      return `${verb} ${changes.map(c => path.basename(String(c.path || ''))).filter(Boolean).slice(0, 4).join(', ')}`;
+      return `${verb} ${changes.map(c => baseName(c.path)).filter(Boolean).slice(0, 4).join(', ')}`;
     }
     case 'web_search': return `search: ${item.query || ''}`;
     case 'mcp_tool_call': return `tool: ${item.server || ''}.${item.tool || ''}`;
@@ -164,7 +164,7 @@ function grokCall(ev) {
   const name = String(ev.toolName || ev.title || '').toLowerCase();
   const kind = String(ev.kind || '').toLowerCase();
   const input = ev.rawInput && typeof ev.rawInput === 'object' ? ev.rawInput : {};
-  const file = () => path.basename(String(input.target_file || input.file_path || input.path || input.file || input.filename || input.target_directory || ''));
+  const file = () => baseName(input.target_file || input.file_path || input.path || input.file || input.filename || input.target_directory);
   let k = GROK_TOOL_KIND[name];
   if (!k) {
     if (/subagent|scheduler|monitor|workflow|use_tool|search_tool|ask_user|feedback|plan_mode|image|video/.test(name)) k = 'other';

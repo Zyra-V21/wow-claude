@@ -6,6 +6,11 @@ const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari;
 const fs = require('fs'), path = require('path'), zlib = require('zlib');
 const { execFileSync } = require('child_process');
 
+if (process.platform !== 'win32') {
+  console.log('SKIP Codec.lua round-trip: PowerShell is required on Windows.');
+  process.exit(0);
+}
+
 const CODEC = path.join(__dirname, '..', 'addon', 'WoWAI', 'Codec.lua');
 const CAPTURE = path.join(__dirname, '..', 'bridge', 'capture.ps1');
 const TMP = path.join(__dirname, 'tmp');
