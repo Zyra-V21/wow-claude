@@ -522,6 +522,69 @@ test('/wow-ai reset marks the next message as a new session', () => {
   assert.equal(vm.evaluate('WoWAIDB.chats[1].resetNext'), null);
 });
 
+test('game chat echo: the summary by default, the first lines without one, the whole reply with "echo full"', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  assert.equal(vm.evaluate('WoWAIDB.settings.echo'), 'summary', 'summary echo is the default');
+  const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+  const prints = () => vm.evaluate('table.concat(STUB.prints, "\\n")');
+  const reply = (text, summary) => {
+    vm.run('STUB.prints = {}');
+    vm.run('WoWAI.Send("do it")');
+    const id = vm.num('WoWAIDB.chats[1].pendingId');
+    const sum = summary === undefined ? '' : `, summary = "${summary}"`;
+    nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "${text}", agent = "claude"${sum} } } }`);
+    vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+    assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  };
+
+  // With a summary only the summary is printed; the window keeps the whole reply.
+  reply('Long line one\\nLong line two\\nLong line three\\n\\nTL;DR: Renamed foo.\\nTests pass.', 'Renamed foo.\\nTests pass.');
+  let out = prints();
+  assert.ok(out.includes('[Claude · ') && out.includes('Renamed foo.') && out.includes('Tests pass.'), 'summary lines printed: ' + out);
+  assert.ok(!out.includes('Long line one'), 'the body stays out of the game chat');
+  assert.ok(out.includes('[open]'), 'the open link is there');
+  assert.ok(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text').includes('Long line three'), 'the window has the full reply');
+
+  // Without a summary: the first two lines, then a hint that there is more.
+  reply('Line one\\nLine two\\nLine three\\nLine four');
+  out = prints();
+  assert.ok(out.includes('Line one') && out.includes('Line two'), 'first two lines: ' + out);
+  assert.ok(!out.includes('Line three'), 'third line held back');
+  assert.ok(out.includes('click [open]'), 'hint to open the window');
+
+  // A short reply without a summary needs no hint.
+  reply('Just this');
+  out = prints();
+  assert.ok(out.includes('Just this') && !out.includes('click [open] to read'), out);
+
+  // "echo full" prints everything, as before.
+  vm.run('SlashCmdList.WOWAI("echo full")');
+  assert.equal(vm.evaluate('WoWAIDB.settings.echo'), 'full');
+  reply('Line one\\nLine two\\nLine three\\n\\nTL;DR: Short.', 'Short.');
+  out = prints();
+  assert.ok(out.includes('Line one') && out.includes('Line three') && out.includes('TL;DR: Short.'), out);
+  vm.run('SlashCmdList.WOWAI("echo summary")');
+  assert.equal(vm.evaluate('WoWAIDB.settings.echo'), 'summary');
+  vm.run('SlashCmdList.WOWAI("echo bogus")');
+  assert.equal(vm.evaluate('WoWAIDB.settings.echo'), 'summary', 'an unknown mode is ignored');
+
+  // An install that still had the old default saved moves to summary once; a mode picked on purpose stays.
+  const vm2 = newVM();
+  vm2.run('WoWAIDB = { settings = { echo = "full" } }');
+  login(vm2);
+  assert.equal(vm2.evaluate('WoWAIDB.settings.echo'), 'summary');
+  const vm3 = newVM();
+  vm3.run('WoWAIDB = { settings = { echo = "short" } }');
+  login(vm3);
+  assert.equal(vm3.evaluate('WoWAIDB.settings.echo'), 'short');
+  const vm4 = newVM();
+  vm4.run('WoWAIDB = { settings = { echo = "full", echoV2 = true } }');
+  login(vm4);
+  assert.equal(vm4.evaluate('WoWAIDB.settings.echo'), 'full');
+});
+
 test('a restore bundle addressed to this session adds the missing chats once', () => {
   const vm = newVM();
   login(vm);

@@ -101,7 +101,7 @@ Right-clicking a chat in the left panel opens a small menu with **Rename...**, *
 | `/wow-ai reset` | wipe this chat's agent memory, keep the transcript |
 | `/wow-ai context [on\|off]` | show what the agent is told about your character and location, or turn it on/off |
 | `/wow-ai rename`, `/wow-ai delete`, `/wow-ai clear` | manage the current chat |
-| `/wow-ai echo full\|short\|off\|<chars>` | how much of each reply to print into the game chat (default 4000 chars) |
+| `/wow-ai echo summary\|full\|short\|off\|<chars>` | how much of each reply to print into the game chat. `summary` (the default) prints only the agent's closing TL;DR lines, the full reply is in the window behind `[open]`; `full` prints up to 4000 chars, `short` one preview line |
 | `/wow-ai longchat on` | let the game chat box take 4000 characters, for long `/ai` messages |
 | `/wow-ai bind <key>` | hotkey: checks for a reply while waiting, otherwise toggles the window |
 | `/wow-ai cancel` | stop waiting on this chat's reply |
@@ -112,6 +112,10 @@ Right-clicking a chat in the left panel opens a small menu with **Rename...**, *
 | `/wow-ai help` | the full list |
 
 Click any message, or `/wow-ai copy` for the last reply, to open it in a selectable box for Ctrl+C.
+
+### Short in the chat, full in the window
+
+Every run tells the agent that only a short summary of its reply is printed in the game chat, and asks it to end each reply with a `TL;DR:` block of one or two lines. The bridge splits that block off and the addon prints just those lines under `[Claude · chat]`, with the `[open]` link to the whole reply in the window (the window keeps the full text, TL;DR included). When an agent forgets the block, the first two lines of the reply are printed instead, with a hint to open the rest. `/wow-ai echo full` goes back to printing the whole reply.
 
 ### The agent knows where you are
 

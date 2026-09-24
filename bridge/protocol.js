@@ -148,34 +148,55 @@ function parseOutbox(src) {
 }
 
 // ---------------------------------------------------------------------------
-// Game context
+// System prompt: reply format, game context, primer
 // ---------------------------------------------------------------------------
 
-// What the agent is told about where the message comes from, appended to its
-// system prompt on every run while the addon has sent a context (the player's
-// character, location and so on; see GameContext in WoWAI.lua), plus the
-// addon/macro primer (docs/WOW-ADDON-PRIMER.md) so it can write for this
-// client whatever folder the chat works in. Empty context = nothing appended,
-// primer included, so a bridge used for unrelated projects, or an addon with
-// `/wow-ai context off`, leaves the agent exactly as it was. Claude and Grok
-// take this as a system prompt; for Codex, agents.js puts it at the top of
-// the prompt.
+// What the agent is told on every run. First how the reply is shown: the full
+// reply goes to the addon's window and only its closing "TL;DR:" block is
+// printed in the game chat, so every reply must end with one. Then, while the
+// addon has sent a context (the player's character, location and so on; see
+// GameContext in WoWAI.lua), that context plus the addon/macro primer
+// (docs/WOW-ADDON-PRIMER.md) so it can write for this client whatever folder
+// the chat works in. Empty context = neither is appended, so a bridge used for
+// unrelated projects, or an addon with `/wow-ai context off`, only gets the
+// reply-format rule. Claude and Grok take this as a system prompt; for Codex,
+// agents.js puts it at the top of the prompt.
+const SUMMARY_MARKER = 'TL;DR:';
+const REPLY_FORMAT = [
+  'The user is talking to you from inside World of Warcraft through the wow-ai addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
+  '',
+  `Only a short summary of each reply is printed into the game chat, where the user actually sees it while playing; the full reply is only visible if they open the addon window. So end EVERY reply with a final block that starts with "${SUMMARY_MARKER}" on its own line and holds one or two short lines (under about 200 characters in total) saying what you did or what the answer is, and what you need from the user if anything. Write it as plain text. Do not repeat the summary elsewhere, and put nothing after it.`,
+];
+
 function systemPrompt(ctx, primer) {
+  const lines = [...REPLY_FORMAT];
   const text = String(ctx || '').trim();
-  if (!text) return '';
-  const lines = [
-    'The user is talking to you from inside World of Warcraft through the wow-ai addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
-    '',
-    'Their in-game situation when the message was written, as reported by the addon:',
-    text,
-    '',
-    'Use this when the request is about the game or the character (questions, macros, addon code, gear advice); ignore it when the task is unrelated. Items, spells or quests the player shift-clicked into a message appear as [Name] in the text, with their tooltip in a "Linked from the game" block at the end of the message.',
-  ];
-  const ref = String(primer || '').trim();
+  if (text) {
+    lines.push('',
+      'Their in-game situation when the message was written, as reported by the addon:',
+      text,
+      '',
+      'Use this when the request is about the game or the character (questions, macros, addon code, gear advice); ignore it when the task is unrelated. Items, spells or quests the player shift-clicked into a message appear as [Name] in the text, with their tooltip in a "Linked from the game" block at the end of the message.');
+  }
+  const ref = text ? String(primer || '').trim() : '';
   if (ref) {
     lines.push('', 'Reference for writing addons and macros for this client. Follow it when the task is about WoW, and check anything it marks as uncertain against the Blizzard UI source it names:', '', ref);
   }
   return lines.join('\n');
+}
+
+// Pull the game-chat summary out of a reply: whatever follows the last "TL;DR:"
+// marker that starts a line (bold or a heading around it is tolerated:
+// "**TL;DR:**", "## TL;DR"). The text for the window stays the whole reply, so
+// nothing the agent wrote is lost however the addon cuts the echo; without a
+// marker the summary is empty and the addon falls back to the reply's first
+// lines.
+const MARKER_RE = /(?:^|\n)[ \t]*(?:#+[ \t]*)?(?:\*\*|__)?[ \t]*TL;?DR[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*/gi;
+function splitSummary(text) {
+  const full = String(text || '').trim();
+  const last = [...full.matchAll(MARKER_RE)].pop();
+  const summary = last ? full.slice(last.index + last[0].length).trim() : '';
+  return { text: full, summary };
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +275,7 @@ function luaTable(globalName, records, opts = {}) {
     lines.push(`\t\t\tcwd = ${luaStr(r.cwd || '')},`);
     lines.push(`\t\t\tsession = ${luaStr(r.session || '')},`);
     lines.push(`\t\t\tagent = ${luaStr(r.agent || '')},`);
+    if (r.summary) lines.push(`\t\t\tsummary = ${luaStr(r.summary)},`);
     if (Array.isArray(r.denied) && r.denied.length) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
@@ -292,7 +314,7 @@ module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
   alreadyHandled, markHandled, pruneStale, MONTH_MS,
   resolveCwd, sameFolder,
-  parseFlags, jobsFromStrip, parseOutbox, systemPrompt,
+  parseFlags, jobsFromStrip, parseOutbox, systemPrompt, splitSummary,
   ruleFor, describeToolUse,
   luaStr, luaTable, SILENT_WAV,
 };
