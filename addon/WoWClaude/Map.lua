@@ -480,8 +480,11 @@ function M.Sync(m)
 	for _, l in ipairs(changed) do
 		mdb.hidden[l.name] = nil
 		Print(string.format("%s: %d point(s)%s. Open the map (M) to see it.", l.title or l.name, #l.points, l.ordered and ", route" or ""))
-		-- A new or changed route starts navigation at its first stop.
-		if l.ordered and #l.points > 0 then mdb.nav = { layer = l.name, index = 1 } end
+		-- A new or changed route on the player's continent starts navigation at its first stop.
+		local here = PlayerOnContinent()
+		if l.ordered and #l.points > 0 and (not here or ContinentOf(l.points[1][1]) == here) then
+			mdb.nav = { layer = l.name, index = 1 }
+		end
 	end
 	M.UpdateNavigator()
 	M.Refresh()
