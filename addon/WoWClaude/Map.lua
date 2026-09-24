@@ -208,21 +208,21 @@ local function AddLine(x1, y1, x2, y2, color, thickness)
 	l:Show()
 end
 
--- Skill of a profession by name, from the classic skill lines.
-local function SkillRank(name)
-	local n = Try(GetNumSkillLines)
-	if type(n) ~= "number" then return end
-	for i = 1, n do
-		local sname, isHeader, _, rank = Try(GetSkillLineInfo, i)
-		if not isHeader and sname == name then return rank end
+-- Skill of a profession (Mining 186, Herbalism 182), or nil if not learned.
+local SKILL_IDS = { mining = 186, herbalism = 182 }
+local SKILL_NAMES = { mining = MINING or "Mining", herbalism = HERBALISM or "Herbalism" }
+local function SkillRank(prof)
+	local lines = WoWClaude and WoWClaude.SkillLines and WoWClaude.SkillLines() or {}
+	for _, sk in ipairs(lines) do
+		if not sk.isHeader and (sk.skillID == SKILL_IDS[prof] or sk.name == SKILL_NAMES[prof]) then return sk.rank end
 	end
 end
 
 local function NodeFilter()
 	local f = DB().nodes
 	local want = {}
-	if f.ore then want.mining = SkillRank(MINING or "Mining") or false end
-	if f.herb then want.herbalism = SkillRank(HERBALISM or "Herbalism") or false end
+	if f.ore then want.mining = SkillRank("mining") or false end
+	if f.herb then want.herbalism = SkillRank("herbalism") or false end
 	return want, f.filter
 end
 
@@ -247,11 +247,18 @@ local function DrawNodes(mapID, scale)
 				if not b then
 					b = NewPin(NODE_SIZE)
 					b.ring:SetSize(NODE_SIZE + 2, NODE_SIZE + 2)
+					-- Hover shows the tooltip; clicks and drags go through to the map (pan, zoom).
+					if b.SetMouseClickEnabled then b:SetMouseClickEnabled(false) end
+					b.info = {}
 					nodePins[nodeCount] = b
 				end
 				b.dot:SetVertexColor(color[1], color[2], color[3], 0.9)
 				b.num:SetText("")
-				b.info = { title = kind[1], label = (prof == "mining" and "Mining " or "Herbalism ") .. kind[3], hint = rank == false and "You don't have this profession" or nil }
+				local info = b.info
+				info.title = kind[1]
+				info.label = (prof == "mining" and "Mining " or "Herbalism ") .. kind[3]
+				info.hint = rank == false and "You don't have this profession" or nil
+				info.layer = nil
 				Place(b, x, y, scale)
 			end
 		end
@@ -272,7 +279,7 @@ function M.Refresh()
 	local nav = DB().nav
 	for _, l in ipairs(Layers()) do
 		if not mdb.hidden[l.name] then
-			local prev
+			local prev, first
 			for i, p in ipairs(l.points) do
 				local x, y = Project(p[1], p[2] / 100, p[3] / 100, mapID)
 				local inside = x and x >= 0 and x <= 1 and y >= 0 and y <= 1
@@ -290,9 +297,14 @@ function M.Refresh()
 					b.info = { title = l.title, label = p[4] ~= "" and p[4] or l.name, layer = l.name, index = i, hint = "Click: navigate here" }
 					Place(b, x, y, scale)
 					prev = { x, y }
+					first = first or { x, y, color }
 				else
 					prev = nil
 				end
+			end
+			-- A loop closes back to its first stop.
+			if l.loop and l.ordered and prev and first and #l.points > 2 then
+				AddLine(prev[1], prev[2], first[1], first[2], first[3], 2.5 * scale)
 			end
 		end
 	end

@@ -209,8 +209,18 @@ function resolveClaude() {
 // while after it changes, and after every hello (a fresh or wiped client).
 if (!state.map) state.map = P.newMap();
 const MAP_DIR = path.join(HERE, 'mapjobs');
-const MAP_SHARE_MS = 10 * 60 * 1000;
+// Every publish rewrites all slot files, so the map rides along only for a short
+// while, and on progress publishes only while it is small.
+const MAP_SHARE_MS = 3 * 60 * 1000;
+const MAP_PROGRESS_MAX = 20000;
 let mapShareUntil = Object.keys(state.map.layers).length ? Date.now() + MAP_SHARE_MS : 0;
+let mapLuaCache = { version: -1, epoch: '', text: '' };
+function mapLuaSize() {
+  if (mapLuaCache.version !== state.map.version || mapLuaCache.epoch !== state.map.epoch) {
+    mapLuaCache = { version: state.map.version, epoch: state.map.epoch, text: P.luaMap(state.map) };
+  }
+  return mapLuaCache.text.length;
+}
 
 function mapFileFor(job) {
   return path.join(MAP_DIR, `${String(job.chat || 'default').replace(/[^\w-]/g, '_')}-${job.id}.jsonl`);
@@ -238,8 +248,8 @@ function takeMapCommands(job, text) {
 }
 
 // Slot file / Inbox.lua body: see protocol.luaTable.
-function slotFile(globalName, records) {
-  const map = Date.now() < mapShareUntil ? state.map : null;
+function slotFile(globalName, records, urgent = true) {
+  const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
   return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, map });
 }
 
@@ -256,11 +266,11 @@ function slotsInstalled() {
 // take the bridge down: capture and Claude runs keep working, and the game just
 // won't see replies until `node setup.js` has run and WoW was restarted.
 let warnedNoAddon = false;
-function publishNow() {
+function publishNow(urgent = true) {
   lastPublish = Date.now();
   const records = [...live.values()].slice(-30);
   try {
-    atomicWrite(cfg.inboxFile, slotFile('WoWClaude_Inbox', records));
+    atomicWrite(cfg.inboxFile, slotFile('WoWClaude_Inbox', records, urgent));
   } catch (e) {
     if (!warnedNoAddon) {
       warnedNoAddon = true;
@@ -269,7 +279,7 @@ function publishNow() {
     return;
   }
   if (!slotsInstalled()) return;
-  const body = slotFile('WoWClaude_SlotData', records);
+  const body = slotFile('WoWClaude_SlotData', records, urgent);
   for (let i = 1; i <= SLOTS; i++) {
     try { atomicWrite(path.join(cfg.addonDir, 'WoWClaude_S' + pad3(i), 'Inbox.lua'), body); } catch {}
   }
@@ -284,8 +294,8 @@ function publish(key, record, urgent) {
   live.set(key, record);
   if (urgent) { if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; } publishNow(); return; }
   const wait = (cfg.progressWriteMs || 3000) - (Date.now() - lastPublish);
-  if (wait <= 0) publishNow();
-  else if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publishNow(); }, wait);
+  if (wait <= 0) publishNow(false);
+  else if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publishNow(false); }, wait);
 }
 
 function signal(kind, id, on) {
@@ -409,7 +419,8 @@ function submit(job) {
     saveState();
     signal('ack', job.id, true);
     maybeOfferRestore(job);
-    if (Object.keys(state.map.layers).length) mapShareUntil = Date.now() + MAP_SHARE_MS;
+    // Even an empty set: a client holding layers from a reset bridge must drop them.
+    mapShareUntil = Date.now() + MAP_SHARE_MS;
     publishNow();
     log(`hello from session ${job.session}${pendingRestore ? ' (restore offered)' : ''}`);
     return;
@@ -473,6 +484,7 @@ function runJob(job) {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', cfg.permissionMode || 'acceptEdits'];
   if (Array.isArray(cfg.allowedTools) && cfg.allowedTools.length) args.push('--allowedTools', ...cfg.allowedTools);
   if (cfg.model) args.push('--model', cfg.model);
+  if (Array.isArray(cfg.claudeArgs)) args.push(...cfg.claudeArgs.map(String));
   if (resume) args.push('--resume', resume);
   const sys = P.systemPrompt(gameContext(), primer());
   if (sys) args.push('--append-system-prompt', sys);

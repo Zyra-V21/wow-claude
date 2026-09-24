@@ -19,6 +19,7 @@
   },
   "claudePath": "",
   "model": "",
+  "claudeArgs": [],
   "gameContext": true,
   "primerFile": "docs/WOW-ADDON-PRIMER.md",
   "permissionMode": "acceptEdits",

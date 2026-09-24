@@ -168,8 +168,11 @@ test('herb/ore nodes toggle and follow the gathering skill', () => {
   vm.run('SlashCmdList.WOWCLAUDEMAP("ore on")');
   // No Mining skill line in the stub: every ore shows, flagged as not learned.
   assert.deepEqual(shownPins(vm).map(p => p.split(',').slice(0, 2).join(',') + ',' + p.split(',')[3]), ['100,140,Copper Vein', '300,280,Copper Vein', '500,350,Tin Vein']);
-  // With Mining 50, Tin (65) is filtered out until "filter all".
-  vm.run('local orig = GetSkillLineInfo; GetNumSkillLines = function() return 1 end; GetSkillLineInfo = function() return "Mining", false, false, 50 end; WoWClaudeMap.Refresh()');
+  // With Mining 50 (Forever's C_SkillInfo: one table per line), Tin (65) is filtered out until "filter all".
+  vm.run(`C_SkillInfo = { GetNumSkillLines = function() return 2 end, GetSkillLineInfo = function(i)
+    if i == 1 then return { name = "Professions", isHeader = true, rank = 0, maxRank = 0, skillID = 0 } end
+    return { name = "Bergbau", isHeader = false, rank = 50, maxRank = 75, skillID = 186 } end }
+    WoWClaudeMap.Refresh()`);
   assert.equal(shownPins(vm).length, 2);
   vm.run('SlashCmdList.WOWCLAUDEMAP("filter all")');
   assert.equal(shownPins(vm).length, 3);
@@ -177,6 +180,8 @@ test('herb/ore nodes toggle and follow the gathering skill', () => {
   assert.equal(shownPins(vm).length, 4);
   vm.run('SlashCmdList.WOWCLAUDEMAP("ore off"); SlashCmdList.WOWCLAUDEMAP("herb off")');
   assert.equal(shownPins(vm).length, 0);
+  // The game context reads professions from the same API.
+  assert.match(vm.evaluate('WoWClaude.GameContext()'), /Professions: Bergbau 50\/75/);
 });
 
 test('/wcmap hide, show, nav and stop', () => {
