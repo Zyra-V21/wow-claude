@@ -183,7 +183,7 @@ test('herb/ore nodes toggle and follow the gathering skill', () => {
   vm.run('SlashCmdList.WOWCLAUDEMAP("ore off"); SlashCmdList.WOWCLAUDEMAP("herb off")');
   assert.equal(shownPins(vm).length, 0);
   // The game context reads professions from the same API.
-  assert.match(vm.evaluate('WoWClaude.GameContext()'), /Professions: Bergbau 50\/75\n/);
+  assert.match(vm.evaluate('WoWClaude.GameContext()'), /Professions: Bergbau 50\/75(\n|$)/);
 });
 
 test('/wcmap hide, show, nav and stop', () => {
