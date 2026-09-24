@@ -70,6 +70,12 @@ local function ToHex(s)
 	end))
 end
 
+-- Record fields use control characters as separators, so keep them out of the wire format.
+local function Wire(s)
+	local value = tostring(s or "")
+	return (value:gsub("[\30\31]", " "))
+end
+
 -- EditBoxes do not render UI escape sequences, so just make pipes harmless.
 local function Display(s)
 	return (tostring(s or ""):gsub("|", "¦"))
@@ -358,14 +364,13 @@ end
 -- per frame. The context field is only present when the flags carry "c", so the
 -- bridge can tell it from a separator inside the text.
 local function RecordFor(id, rec)
-	local name = (rec.name or ""):gsub("[\30\31]", " ")
-	local flags = rec.flags or ""
-	local fields = { db.session, rec.chat, tostring(id), rec.cwd, flags, name }
+	local flags = Wire(rec.flags)
+	local fields = { Wire(db.session), Wire(rec.chat), tostring(id), Wire(rec.cwd), flags, Wire(rec.name) }
 	if rec.ctx ~= nil then
 		fields[5] = flags == "" and "c" or (flags .. ";c")
-		table.insert(fields, (rec.ctx:gsub("[\30\31]", " ")))
+		table.insert(fields, Wire(rec.ctx))
 	end
-	table.insert(fields, rec.text)
+	table.insert(fields, Wire(rec.text))
 	return table.concat(fields, US)
 end
 
@@ -1163,7 +1168,11 @@ function WoWAI.Send(text, allow)
 	local tokens = {}
 	if c.resetNext then table.insert(tokens, "n") end
 	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
-	if allow and #allow > 0 then table.insert(tokens, "allow=" .. table.concat(allow, ",")) end
+	local allowHex
+	if type(allow) == "table" and #allow > 0 then
+		table.insert(tokens, "allow=" .. table.concat(allow, ","))
+		allowHex = ToHex(table.concat(allow, US))
+	end
 	local flags = table.concat(tokens, ";")
 	local newSession = c.resetNext and true or nil
 	c.resetNext = nil
@@ -1175,6 +1184,7 @@ function WoWAI.Send(text, allow)
 		cwd = ToHex(c.cwd),
 		ctx = ctx and ToHex(ctx) or nil,
 		agent = (c.agent and c.agent ~= "") and c.agent or nil,
+		allow = allowHex,
 		newSession = newSession,
 		t = time(),
 	}

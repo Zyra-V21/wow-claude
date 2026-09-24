@@ -27,6 +27,12 @@ This release renames the project from **wow-claude** to **WoW AI** (`wow-ai`) an
 
 ### Fixed
 
+- Reload-mode messages now preserve permission grants for the bridge.
+- Outbound wire fields now replace record separators inside user text and context.
+- State, transcript, and permission-config writes now use the existing atomic writer.
+- Agent parser failures now return a bridge error instead of terminating the bridge.
+- Windows paths now keep their drive roots in portable protocol tests and progress labels.
+- Non-Windows test runs now skip the PowerShell codec check with a clear message.
 - Deleting a chat in game now tells the bridge to forget its transcript and agent session (a `d` strip record), so a later restore no longer brings the chat back. Deletions made while the bridge was away are resent with the next hello.
 - On clients where the sound-file self-test fails (an empty `.wav` reports as playable), the addon can't hear the bridge's 30-second presence beats, and the status light went yellow 90 s after every reply, so each new message needed a Reconnect click and burned a slot. In that mode the light now allows for the 10-minute idle slot poll (green up to 12 min without news, "down" after 22), so it stays green while the bridge is running.
 - A message sent while the light is not green is now sent automatically once the bridge answers the reconnect, instead of waiting for a second click on Send.

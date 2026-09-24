@@ -95,6 +95,8 @@ test('parseOutbox decodes the SavedVariables fallback', () => {
   const hex = s => Buffer.from(s, 'utf8').toString('hex');
   const src = `WoWAIDB = {\n["outbox"] = {\n["id"] = 7,\n["session"] = "abc123",\n["chat"] = "c1",\n["text"] = "${hex('héllo')}",\n["cwd"] = "${hex('realms')}",\n["newSession"] = true,\n},\n["settings"] = {},\n}`;
   assert.deepEqual(P.parseOutbox(src), { id: 7, session: 'abc123', chat: 'c1', text: 'héllo', cwd: 'realms', newSession: true, via: 'reload' });
+  const withAllow = src.replace('["newSession"]', `["allow"] = "${hex('WebSearch\x1fBash(git:*)')}",\n["newSession"]`);
+  assert.deepEqual(P.parseOutbox(withAllow).allow, ['WebSearch', 'Bash(git:*)']);
   const withCtx = src.replace('["newSession"]', `["ctx"] = "${hex('Character: Testchar')}",\n["newSession"]`);
   assert.equal(P.parseOutbox(withCtx).ctx, 'Character: Testchar');
   const withAgent = src.replace('["newSession"]', '["agent"] = "codex",\n["newSession"]');
@@ -112,7 +114,7 @@ test('resolveCwd: empty is the default, relative joins it, ~ is home, absolute w
   assert.equal(P.resolveCwd('./realms/', base), path.join(base, 'realms'));
   assert.equal(P.resolveCwd('../other', base), path.resolve(base, '..', 'other'));
   assert.equal(P.resolveCwd('~/x', base), path.join(os.homedir(), 'x'));
-  assert.equal(P.resolveCwd('D:\\elsewhere', base), path.resolve('D:\\elsewhere'));
+  assert.equal(P.resolveCwd('D:\\elsewhere', base), path.win32.normalize('D:\\elsewhere'));
   assert.ok(P.sameFolder('C:\\A\\b\\', 'c:/a/B'));
   assert.ok(!P.sameFolder('C:\\a', 'C:\\a\\b'));
 });

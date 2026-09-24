@@ -34,7 +34,7 @@ npm install          # test tooling only: fengari (Lua VM) and luaparse
 npm test
 ```
 
-`npm test` needs Windows, because the codec round-trip runs the real `capture.ps1` decoder in PowerShell. Everything else in the suite is portable. CI runs the same command on `windows-latest` (`.github/workflows/test.yml`).
+`npm test` runs the portable suite on every platform. Windows also runs the codec round-trip through `capture.ps1`; other platforms print an explicit skip. CI runs the full command on `windows-latest` (`.github/workflows/test.yml`).
 
 To try changes in the game, run `node setup.js` (it re-copies the addon into `Interface\AddOns\WoWAI`) and `/reload`. Bridge changes take effect on the next `npm start`.
 

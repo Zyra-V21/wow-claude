@@ -12,6 +12,23 @@ function fromHex(hex) {
 
 function pad3(n) { return String(n).padStart(3, '0'); }
 
+// Treat Windows paths consistently when tests or imported agent events run on
+// another platform. The bridge still targets Windows, but protocol data can be
+// inspected and tested elsewhere.
+function isWindowsAbsolute(p) {
+  const value = String(p || '');
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value);
+}
+
+function baseName(p) {
+  return String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+}
+
+function comparableWindowsPath(p) {
+  const normalized = path.win32.normalize(String(p || ''));
+  return normalized.length > 3 ? normalized.replace(/[\\/]$/, '') : normalized;
+}
+
 // Reply slot / signal file number for a message id (1-based, wraps at `slots`).
 function slotNumber(id, slots) { return ((id - 1) % slots) + 1; }
 
@@ -71,12 +88,20 @@ function pruneStale(state, transcripts, now = Date.now(), maxAgeMs = MONTH_MS) {
 function resolveCwd(raw, base) {
   let p = String(raw || '').trim();
   if (!p) return base;
-  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) p = path.join(os.homedir(), p.slice(1));
+  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) {
+    p = path.join(os.homedir(), p.slice(1).replace(/^[\\/]+/, ''));
+  }
+  if (isWindowsAbsolute(p)) return path.win32.normalize(p);
   return path.resolve(base, p);
 }
 
 function sameFolder(a, b) {
-  return path.resolve(a || '').toLowerCase() === path.resolve(b || '').toLowerCase();
+  const left = String(a || '');
+  const right = String(b || '');
+  if (isWindowsAbsolute(left) || isWindowsAbsolute(right)) {
+    return comparableWindowsPath(left).toLowerCase() === comparableWindowsPath(right).toLowerCase();
+  }
+  return path.resolve(left) === path.resolve(right);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +169,8 @@ function parseOutbox(src) {
   if (ctx) job.ctx = fromHex(ctx[1]);
   const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
   if (agent && agent[1]) job.agent = agent[1].toLowerCase();
+  const allow = b.match(/\["allow"\]\s*=\s*"([0-9a-fA-F]*)"/);
+  if (allow && allow[1]) job.allow = fromHex(allow[1]).split('\x1F').filter(Boolean);
   return job;
 }
 
@@ -202,9 +229,9 @@ function describeToolUse(block) {
   const inp = block.input || {};
   switch (block.name) {
     case 'Bash': return `$ ${String(inp.command || '').split('\n')[0].slice(0, 110)}`;
-    case 'Read': return `read ${path.basename(inp.file_path || '')}`;
-    case 'Edit': return `edit ${path.basename(inp.file_path || '')}`;
-    case 'Write': return `write ${path.basename(inp.file_path || '')}`;
+    case 'Read': return `read ${baseName(inp.file_path)}`;
+    case 'Edit': return `edit ${baseName(inp.file_path)}`;
+    case 'Write': return `write ${baseName(inp.file_path)}`;
     case 'Grep': return `grep ${inp.pattern || ''}`;
     case 'Glob': return `glob ${inp.pattern || ''}`;
     case 'Agent': return `agent: ${inp.description || ''}`;
@@ -291,7 +318,7 @@ const SILENT_WAV = (() => {
 module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
   alreadyHandled, markHandled, pruneStale, MONTH_MS,
-  resolveCwd, sameFolder,
+  resolveCwd, sameFolder, baseName,
   parseFlags, jobsFromStrip, parseOutbox, systemPrompt,
   ruleFor, describeToolUse,
   luaStr, luaTable, SILENT_WAV,

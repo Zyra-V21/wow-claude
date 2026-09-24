@@ -124,6 +124,15 @@ test('hello goes out on the strip after login', () => {
   assert.equal(recs[0].session, vm.evaluate('WoWAIDB.session'));
 });
 
+test('outbound records replace field separators inside user text', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Send("wire" .. string.char(30, 31) .. "safe")');
+  const rec = stripRecords(vm).find(r => r.text === 'wire  safe');
+  assert.ok(rec, 'the record keeps the full message as one wire field');
+});
+
 test('the game context describes the character and rides on the hello, then only when it changes or is turned off', () => {
   const vm = newVM();
   login(vm);
@@ -636,9 +645,10 @@ test('reload mode writes the outbox for the bridge instead of drawing the strip'
   login(vm);
   vm.run('SlashCmdList.WOWAI("mode reload")');
   vm.run('SlashCmdList.WOWAI("reset")');
-  vm.run('WoWAI.Send("via reload")');
+  vm.run('WoWAI.Send("via reload", { "WebSearch", "Bash(git:*)" })');
   assert.equal(vm.evaluate('STUB.reloaded'), 'true');
   assert.equal(vm.evaluate('WoWAIDB.outbox.newSession'), 'true');
   assert.equal(vm.evaluate('WoWAIDB.outbox.text'), Buffer.from('via reload').toString('hex'));
+  assert.equal(Buffer.from(vm.evaluate('WoWAIDB.outbox.allow'), 'hex').toString('utf8'), 'WebSearch\x1fBash(git:*)');
   assert.equal(decodeStrip(vm), null);
 });
