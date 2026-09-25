@@ -5,7 +5,7 @@ Two processes that can't talk to each other directly, and how they do anyway.
 ```
    WoW client (Lua sandbox)                        bridge.js (Node, same machine)
    ┌──────────────────────────┐                    ┌─────────────────────────────┐
-   │ WoWAI addon              │  pixels on screen  │ capture.ps1 (PowerShell)    │
+   │ WoWAI addon              │  pixels on screen  │ capture.ps1 / capture_x11.py│
    │  draws message strip ────┼───────────────────▶│  screen-captures the corner │
    │                          │                    │  decodes → {session,chat,id,│
    │                          │                    │            cwd,flags,name,  │
@@ -50,14 +50,14 @@ session \x1F chat \x1F id \x1F cwd \x1F flags \x1F name \x1F [context \x1F] text
 
 - `session` — a random token generated when the addon's saved data is created. Message ids restart if the client wipes saved data; the bridge dedups on `(session, id)`.
 - `flags` — `n` = start a fresh agent session; `h` = hello (announce the session token, no prompt); `d` = the chat was deleted in game: drop its transcript and agent session, no prompt (the addon keeps the id in `db.forget` and resends it with each hello until the bridge acks); `c` = a game-context field sits between `name` and `text`; `allow=Rule1,Rule2` = add permission rules before running; `agent=codex` = run this chat with that agent instead of the bridge's default (absent for chats on the default). The reload outbox stores the allow list as hex text separated by `US`, so `/reload` preserves the same permission grant.
-- `context` — only present with the `c` flag (so a separator inside the text can't be mistaken for it): a few lines about the game, character, zone, map coordinates, money, talents and professions (`WoWAI.GameContext()`, capped at 700 bytes; since coordinates change as you move, most messages sent after walking somewhere carry a fresh copy). Every hello carries it (empty when `/wow-ai context off`); a message carries it only when it differs from the last version the bridge acknowledged, and only if it fits next to the text.
+- `context` — only present with the `c` flag (so a separator inside the text can't be mistaken for it): a few lines about the game, character, zone, map coordinates, money, talents, professions and quest log ids (`WoWAI.GameContext()`, capped at 900 bytes; since coordinates change as you move, most messages sent after walking somewhere carry a fresh copy). Every hello carries it (empty when `/wow-ai context off`); a message carries it only when it differs from the last version the bridge acknowledged, and only if it fits next to the text.
 - `text` — the message. Item, spell and quest links the player shift-clicked in (`|Hitem:2140:…|h[Fine Longsword]|h`) are expanded before sending: `[Fine Longsword]` stays in the text and the link's tooltip, read off a hidden `GameTooltip` via `SetHyperlink`, is appended in a `--- Linked from the game ---` block.
 
 The strip stays up until the bridge acknowledges the message (see signals) or 40 s pass, then it is re-shown up to three times before the addon gives up on pixels and arms the reload fallback for that message.
 
-`capture.ps1` finds the game window by process name, captures the client area's top-left 800×192 px with GDI (`CopyFromScreen`, DPI-aware), samples the center pixel of each cell, and validates magic, length and checksum. It prints one JSON line per new message and rate-limited warnings when a frame is seen but rejected. `bridge.js` restarts it if it exits.
+`capture.ps1` finds the game window by process name, captures the client area's top-left 800×192 px with GDI (`CopyFromScreen`, DPI-aware), samples the center pixel of each cell, and validates magic, length and checksum. It prints one JSON line per new message and rate-limited warnings when a frame is seen but rejected. `bridge.js` restarts it if it exits. Off Windows, `capture_x11.py` does the same through libX11 (ctypes, no packages): it finds the game's Wine window by its WM_CLASS, grabs the corner from the root window, and searches a few pixels around the origin for the magic so a misaligned window still decodes.
 
-Exclusive fullscreen blocks GDI capture; borderless/windowed works. HDR was not tested.
+Exclusive fullscreen blocks GDI capture; borderless/windowed works. HDR was not tested. On Linux, Wayland sessions block reading other windows, and a compositor that unredirects the game window can hand back a black or stale frame (`capture.keepComposited` asks it not to).
 
 ## Inbound: load-on-demand slots
 
@@ -70,6 +70,7 @@ WoWAI_SlotData = {
   ts = "...", now = <bridge epoch seconds>, cwd = "<the bridge's default folder>",
   agent = "claude", agents = { "claude", "codex", "grok" },   -- the default agent, and the ones the bridge knows
   replies = { { chat = "...", id = 12, status = "working"|"done"|"error", text = "...", cwd = "...", session = "<agent session id>", agent = "codex", denied = { "WebSearch" } }, … },
+  map = { epoch = "...", version = 3, layers = { … } },  -- the agent's map layers (docs/MAP.md): for a while after they change and after every hello
   restore = { token = "...", chats = { … } },   -- only right after a saved-data reset
 }
 ```
@@ -126,4 +127,4 @@ The same content is written to `WoWAI/Inbox.lua`, which the game reads on `/relo
 - A raised signal file stays "valid" in the client until a full restart, so slot numbers that wrap around (every 200 messages) lose the cheap signals until then. Self-detected.
 - Message capacity ≈ 3.2 KB per send; longer text is refused with a hint.
 - Replies are published in full (a ~3 KB message can produce a 60 KB reply; that is fine for a slot file). The bridge-side transcript keeps the first 4000 characters of each message, and a restore sends back the last 40 messages per chat at 2000 characters each.
-- Windows only (PowerShell capture, NTFS).
+- Windows, or Linux with the game under Wine on X11 (see [INSTALL-LINUX.md](INSTALL-LINUX.md)). macOS is untested.

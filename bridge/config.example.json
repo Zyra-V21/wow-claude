@@ -15,7 +15,10 @@
     "cellPx": 4,
     "cellsPerRow": 200,
     "maxRows": 48,
-    "intervalMs": 250
+    "intervalMs": 250,
+    "python": "python3",
+    "windowName": "",
+    "keepComposited": false
   },
   "agent": "claude",
   "agents": {

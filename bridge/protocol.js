@@ -195,6 +195,15 @@ const REPLY_FORMAT = [
   `Only a short summary of each reply is printed into the game chat, where the user actually sees it while playing; the full reply is only visible if they open the addon window. So end EVERY reply with a final block that starts with "${SUMMARY_MARKER}" on its own line and holds one or two short lines (under about 200 characters in total) saying what you did or what the answer is, and what you need from the user if anything. Write it as plain text. Do not repeat the summary elsewhere, and put nothing after it.`,
 ];
 
+// How the agent draws on the world map (see "Map layers" below and docs/MAP.md).
+// Sent with the game context, since marks only make sense in a game chat.
+const MAP_HINT = [
+  'You can mark the player\'s world map. Either append commands to the file named by the WOW_AI_MAP_FILE environment variable (one JSON object per line) or, for a few marks, end the reply with a fenced block whose language tag is wowmap containing them. Commands:',
+  '{"op":"set","layer":"<name>","title":"<shown title>","ordered":true,"loop":false,"points":[{"m":<uiMapID>,"x":<0-100>,"y":<0-100>,"label":"<text>","kind":"quest"}]}  replaces that layer; "ordered" draws a numbered route with a navigator, "loop" closes it.',
+  '{"op":"clear","layer":"<name>"} removes a layer; {"op":"clearall"} removes them all.',
+  'x and y are map percent on the map with that uiMapID (the context gives the player\'s current one). kind is one of ore, herb, quest, turnin, kill, loot, object, explore, npc, trainer, vendor, dungeon, flight, poi. Only mark the map when asked for a route, marks or locations; say in the reply what you drew.',
+];
+
 function systemPrompt(ctx, primer) {
   const lines = [...REPLY_FORMAT];
   const text = String(ctx || '').trim();
@@ -203,7 +212,9 @@ function systemPrompt(ctx, primer) {
       'Their in-game situation when the message was written, as reported by the addon:',
       text,
       '',
-      'Use this when the request is about the game or the character (questions, macros, addon code, gear advice); ignore it when the task is unrelated. Items, spells or quests the player shift-clicked into a message appear as [Name] in the text, with their tooltip in a "Linked from the game" block at the end of the message.');
+      'Use this when the request is about the game or the character (questions, macros, addon code, gear advice); ignore it when the task is unrelated. Items, spells or quests the player shift-clicked into a message appear as [Name] in the text, with their tooltip in a "Linked from the game" block at the end of the message.',
+      '',
+      ...MAP_HINT);
   }
   const ref = text ? String(primer || '').trim() : '';
   if (ref) {
@@ -309,6 +320,7 @@ function luaTable(globalName, records, opts = {}) {
     lines.push('\t\t},');
   }
   lines.push('\t},');
+  if (opts.map) lines.push(luaMap(opts.map));
   const restore = opts.restore;
   if (restore) {
     lines.push('\trestore = {', `\t\ttoken = ${luaStr(restore.token)},`, '\t\tchats = {');
@@ -322,6 +334,131 @@ function luaTable(globalName, records, opts = {}) {
     lines.push('\t\t},', '\t},');
   }
   lines.push('}', '');
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Map layers
+// ---------------------------------------------------------------------------
+//
+// The agent marks the in-game map by writing commands, one JSON object per line,
+// to the file named by WOW_AI_MAP_FILE in its environment (a tool of its own can
+// do that), or with a ```wowmap fenced block in its reply for a few hand-made marks.
+// The system prompt (MAP_HINT) tells it so.
+// The bridge owns the resulting layers (state.json) and ships the whole set,
+// versioned, in the slot files; the addon replaces its copy when the version is
+// newer. So a mark is never applied twice, and a client that lost its saved data
+// gets everything back on its next hello.
+//
+//   {"op":"set","layer":"mining","title":"Copper loop","ordered":true,"loop":true,
+//    "points":[{"m":1432,"x":41.5,"y":47.8,"label":"1. Copper Vein","kind":"ore"}]}
+//   {"op":"clear","layer":"mining"}    {"op":"clearall"}
+
+const MAP_KINDS = new Set(['ore', 'herb', 'quest', 'turnin', 'kill', 'loot', 'object', 'explore', 'npc', 'trainer', 'vendor', 'dungeon', 'flight', 'poi']);
+const MAP_LIMITS = { layers: 12, pointsPerLayer: 400, totalPoints: 1500, label: 80, title: 80 };
+
+function cleanText(s, max) {
+  return String(s ?? '').replace(/[\x00-\x1f\x7f|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+// One command, sanitized, or null (with the reason in `why`).
+function validateMapCommand(c, why = []) {
+  if (!c || typeof c !== 'object') { why.push('not an object'); return null; }
+  if (c.op === 'clearall') return { op: 'clearall' };
+  const layer = String(c.layer ?? '');
+  if (!/^[A-Za-z0-9_.-]{1,32}$/.test(layer)) { why.push(`bad layer name "${layer.slice(0, 40)}"`); return null; }
+  if (c.op === 'clear') return { op: 'clear', layer };
+  if (c.op !== 'set') { why.push(`unknown op "${String(c.op).slice(0, 20)}"`); return null; }
+  if (!Array.isArray(c.points)) { why.push(`layer ${layer}: points must be an array`); return null; }
+  const points = [];
+  for (const p of c.points.slice(0, MAP_LIMITS.pointsPerLayer)) {
+    const m = Number(p && p.m), x = Number(p && p.x), y = Number(p && p.y);
+    if (!Number.isInteger(m) || m <= 0 || m > 99999 || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    points.push({
+      m, x: Math.round(Math.min(100, Math.max(0, x)) * 100) / 100, y: Math.round(Math.min(100, Math.max(0, y)) * 100) / 100,
+      label: cleanText(p.label, MAP_LIMITS.label), kind: MAP_KINDS.has(p.kind) ? p.kind : 'poi',
+    });
+  }
+  if (c.points.length > MAP_LIMITS.pointsPerLayer) why.push(`layer ${layer}: kept the first ${MAP_LIMITS.pointsPerLayer} points`);
+  if (points.length < c.points.slice(0, MAP_LIMITS.pointsPerLayer).length) why.push(`layer ${layer}: dropped invalid points`);
+  if (!points.length) { why.push(`layer ${layer}: no valid points`); return null; }
+  return { op: 'set', layer, title: cleanText(c.title || layer, MAP_LIMITS.title), ordered: !!c.ordered, loop: !!c.loop, points };
+}
+
+function newMap(epoch) {
+  return { epoch: epoch || Math.random().toString(36).slice(2, 10), version: 0, layers: {} };
+}
+
+// Apply commands in order. Returns { changed, notes } and mutates `map`.
+function applyMapCommands(map, cmds, now = Date.now()) {
+  const notes = [];
+  let changed = false;
+  for (const raw of cmds || []) {
+    const why = [];
+    const c = validateMapCommand(raw, why);
+    notes.push(...why);
+    if (!c) continue;
+    if (c.op === 'clearall') {
+      if (Object.keys(map.layers).length) { map.layers = {}; changed = true; }
+      notes.push('cleared all layers');
+    } else if (c.op === 'clear') {
+      if (map.layers[c.layer]) { delete map.layers[c.layer]; changed = true; notes.push(`cleared layer ${c.layer}`); }
+    } else {
+      map.layers[c.layer] = { title: c.title, ordered: c.ordered, loop: c.loop, points: c.points, t: now };
+      changed = true;
+      notes.push(`layer ${c.layer}: ${c.points.length} point(s)`);
+    }
+  }
+  // Keep within budget: drop the oldest layers first.
+  const total = () => Object.values(map.layers).reduce((s, l) => s + l.points.length, 0);
+  const names = () => Object.keys(map.layers).sort((a, b) => map.layers[a].t - map.layers[b].t);
+  while (Object.keys(map.layers).length > MAP_LIMITS.layers || total() > MAP_LIMITS.totalPoints) {
+    const old = names()[0];
+    delete map.layers[old];
+    notes.push(`dropped old layer ${old} (map full)`);
+    changed = true;
+  }
+  if (changed) map.version = (map.version || 0) + 1;
+  return { changed, notes };
+}
+
+// Pull ```wowmap blocks out of a reply: a JSON object, an array, or one object per line.
+function extractMapBlocks(text) {
+  const cmds = [], errors = [];
+  const stripped = String(text ?? '').replace(/```wowmap[^\n]*\n([\s\S]*?)```/g, (_, body) => {
+    const src = body.trim();
+    try {
+      const v = JSON.parse(src);
+      cmds.push(...(Array.isArray(v) ? v : [v]));
+    } catch {
+      for (const line of src.split('\n')) {
+        if (!line.trim()) continue;
+        try { cmds.push(JSON.parse(line)); } catch { errors.push('unreadable wowmap line: ' + line.trim().slice(0, 60)); }
+      }
+    }
+    return '';
+  }).replace(/\n{3,}/g, '\n\n').trim();
+  return { text: stripped, cmds, errors };
+}
+
+// Commands the agent's tools appended to WOW_AI_MAP_FILE (one JSON per line).
+function parseMapFile(src) {
+  const cmds = [], errors = [];
+  for (const line of String(src || '').split('\n')) {
+    if (!line.trim()) continue;
+    try { cmds.push(JSON.parse(line)); } catch { errors.push('unreadable map file line'); }
+  }
+  return { cmds, errors };
+}
+
+function luaMap(map) {
+  const lines = ['\tmap = {', `\t\tepoch = ${luaStr(map.epoch)},`, `\t\tversion = ${Number(map.version) || 0},`, '\t\tlayers = {'];
+  for (const [name, l] of Object.entries(map.layers || {})) {
+    lines.push(`\t\t\t{ name = ${luaStr(name)}, title = ${luaStr(l.title)}, ordered = ${l.ordered ? 'true' : 'false'}, loop = ${l.loop ? 'true' : 'false'}, points = {`);
+    for (const p of l.points) lines.push(`\t\t\t\t{ ${p.m}, ${p.x}, ${p.y}, ${luaStr(p.label)}, ${luaStr(p.kind)} },`);
+    lines.push('\t\t\t} },');
+  }
+  lines.push('\t\t},', '\t},');
   return lines.join('\n');
 }
 
@@ -344,4 +481,5 @@ module.exports = {
   parseFlags, jobsFromStrip, parseOutbox, systemPrompt, splitSummary,
   ruleFor, describeToolUse,
   luaStr, luaTable, SILENT_WAV,
+  MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
 };

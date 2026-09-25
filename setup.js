@@ -41,8 +41,13 @@ function findClient() {
     if (isClient(args.wow)) return args.wow;
     throw new Error(`--wow "${args.wow}" does not look like a WoW client folder (needs Interface\\ and a Wow*.exe)`);
   }
-  const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, 'D:\\', 'E:\\', 'D:\\Games', 'E:\\Games', 'C:\\Games']
-    .filter(Boolean).map(r => path.join(r, 'World of Warcraft'));
+  const roots = process.platform === 'win32'
+    ? [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, 'D:\\', 'E:\\', 'D:\\Games', 'E:\\Games', 'C:\\Games']
+      .filter(Boolean).map(r => path.join(r, 'World of Warcraft'))
+    // Linux: the client lives inside a Wine prefix.
+    : [process.env.WINEPREFIX, path.join(os.homedir(), '.wine'),
+      path.join(os.homedir(), 'Games', 'battlenet')]
+      .filter(Boolean).flatMap(p => ['Program Files (x86)', 'Program Files'].map(pf => path.join(p, 'drive_c', pf, 'World of Warcraft')));
   for (const root of roots) {
     for (const flavor of ['_classic_beta_', '_forever_', '_retail_', '_classic_era_', '_classic_']) {
       const dir = path.join(root, flavor);
@@ -184,7 +189,7 @@ try {
 Done. Next:
   1. Fully quit and relaunch World of Warcraft (it only discovers new addon files at launch).
   2. Enable "WoW AI" at the character select AddOns screen (the WoW AI slot ### entries stay enabled).
-  3. Start the bridge:  npm start   (in this terminal; bridge\\start-window.cmd opens its own window)
+  3. Start the bridge:  npm start   (in this terminal${process.platform === 'win32' ? '; bridge\\start-window.cmd opens its own window' : '; on Linux keep the game borderless/windowed and check the capture with: npm run probe'})
   4. In game:  /wow-ai
 `);
 } catch (e) {

@@ -3,8 +3,10 @@
 ## Notes: Talk to Claude Code, Codex or Grok from inside the game, one session per chat. Needs the companion bridge (see README).
 ## Author: chelinho139
 ## Version: 0.4.0
-## SavedVariables: WoWAIDB
+## SavedVariables: WoWAIDB, WoWAIMapDB
+## OptionalDeps: WoWAI_Nodes
 
 Codec.lua
 Inbox.lua
 WoWAI.lua
+Map.lua
