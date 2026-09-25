@@ -71,7 +71,7 @@ builds a sandbox with a 5-slot pool and runs the bridge with `--inject`, which p
 
 ## Adding an agent
 
-1. An entry in `AGENTS` in `bridge/agents.js`: `name`, `command`, `install` (one line telling the user what to do), `windowsPaths`/`posixPaths` (where its installer puts it), `npmPackage` if it ships one, `args(…)` (the command line for a run: folder, resume id, permissions, model, system prompt), `input(…)` (the prompt on `stdin` or in a `promptFile`), `env(…)`, and a `parser()` whose `feed(event)` returns progress lines, the session id, denied rules, notes and the final `done`.
+1. An entry in `AGENTS` in `bridge/agents.js`: `name`, `command`, `install` (one line telling the user what to do), `windowsPaths`/`posixPaths` (where its installer puts it), `npmPackage` if it ships one, `args(…)` (the command line for a run: folder, resume id, permissions, model, system prompt), `input(…)` (the prompt on `stdin` or in a `promptFile`), `env(…)` (the bridge then adds `WOW_AI_MAP_FILE` for the map layers, see [MAP.md](MAP.md)), and a `parser()` whose `feed(event)` returns progress lines, the session id, denied rules, notes and the final `done`.
 2. A block under `agents` in `bridge/config.example.json`, and the same keys documented in `docs/CONFIGURATION.md`.
 3. A section on this page, and the id in the README's table and the addon's `AGENT_NAMES` (only for its display name; unknown ids are capitalized).
 4. Tests in `tests/agents_test.js`: the arguments for each permission mode, and a sample of the CLI's real stream through the parser.
