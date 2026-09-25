@@ -230,9 +230,54 @@ function killTree(child) {
 // What the game reads
 // ---------------------------------------------------------------------------
 
+// Map layers the agent drew (see protocol.js, "Map layers"). The bridge is the source of
+// truth; slot files carry the whole set while the game may not have it yet: for a
+// while after it changes, and after every hello (a fresh or wiped client).
+if (!state.map) state.map = P.newMap();
+const MAP_DIR = path.join(HERE, 'mapjobs');
+// Every publish rewrites all slot files, so the map rides along only for a short
+// while, and on progress publishes only while it is small.
+const MAP_SHARE_MS = 3 * 60 * 1000;
+const MAP_PROGRESS_MAX = 20000;
+let mapShareUntil = Object.keys(state.map.layers).length ? Date.now() + MAP_SHARE_MS : 0;
+let mapLuaCache = { version: -1, epoch: '', text: '' };
+function mapLuaSize() {
+  if (mapLuaCache.version !== state.map.version || mapLuaCache.epoch !== state.map.epoch) {
+    mapLuaCache = { version: state.map.version, epoch: state.map.epoch, text: P.luaMap(state.map) };
+  }
+  return mapLuaCache.text.length;
+}
+
+function mapFileFor(job) {
+  return path.join(MAP_DIR, `${String(job.chat || 'default').replace(/[^\w-]/g, '_')}-${job.id}.jsonl`);
+}
+
+// Collect what the run asked for (its map file, then ```wowmap blocks in its
+// reply), apply it, and return the reply text without the blocks plus a note
+// for the reply, if anything was asked.
+function takeMapCommands(job, text) {
+  const file = mapFileFor(job);
+  let cmds = [], errors = [];
+  try {
+    const r = P.parseMapFile(fs.readFileSync(file, 'utf8'));
+    cmds = r.cmds; errors = r.errors;
+  } catch {}
+  try { fs.unlinkSync(file); } catch {}
+  const blocks = P.extractMapBlocks(text);
+  cmds.push(...blocks.cmds);
+  errors.push(...blocks.errors);
+  if (!cmds.length && !errors.length) return { text: blocks.text, note: '' };
+  const { changed, notes } = P.applyMapCommands(state.map, cmds);
+  if (changed) { saveState(); mapShareUntil = Date.now() + MAP_SHARE_MS; }
+  const all = [...notes, ...errors];
+  log(`#${job.id} map: ${all.join('; ') || 'no change'} (version ${state.map.version})`);
+  return { text: blocks.text, note: all.length ? `map: ${all.join('; ')}` : '' };
+}
+
 // Slot file / Inbox.lua body: see protocol.luaTable.
-function slotFile(globalName, records) {
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds() });
+function slotFile(globalName, records, urgent = true) {
+  const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
 }
 
 function addonInstalled() {
@@ -248,11 +293,11 @@ function slotsInstalled() {
 // take the bridge down: capture and agent runs keep working, and the game just
 // won't see replies until `node setup.js` has run and WoW was restarted.
 let warnedNoAddon = false;
-function publishNow() {
+function publishNow(urgent = true) {
   lastPublish = Date.now();
   const records = [...live.values()].slice(-30);
   try {
-    atomicWrite(INBOX_FILE, slotFile('WoWAI_Inbox', records));
+    atomicWrite(INBOX_FILE, slotFile('WoWAI_Inbox', records, urgent));
   } catch (e) {
     if (!warnedNoAddon) {
       warnedNoAddon = true;
@@ -261,7 +306,7 @@ function publishNow() {
     return;
   }
   if (!slotsInstalled()) return;
-  const body = slotFile('WoWAI_SlotData', records);
+  const body = slotFile('WoWAI_SlotData', records, urgent);
   for (let i = 1; i <= SLOTS; i++) {
     try { atomicWrite(path.join(cfg.addonDir, 'WoWAI_S' + pad3(i), 'Inbox.lua'), body); } catch {}
   }
@@ -276,8 +321,8 @@ function publish(key, record, urgent) {
   live.set(key, record);
   if (urgent) { if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; } publishNow(); return; }
   const wait = (cfg.progressWriteMs || 3000) - (Date.now() - lastPublish);
-  if (wait <= 0) publishNow();
-  else if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publishNow(); }, wait);
+  if (wait <= 0) publishNow(false);
+  else if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publishNow(false); }, wait);
 }
 
 function signal(kind, id, on) {
@@ -407,6 +452,8 @@ function submit(job) {
     saveState();
     signal('ack', job.id, true);
     maybeOfferRestore(job);
+    // Even an empty set: a client holding layers from a reset bridge must drop them.
+    mapShareUntil = Date.now() + MAP_SHARE_MS;
     publishNow();
     log(`hello from session ${job.session}${pendingRestore ? ' (restore offered)' : ''}`);
     return;
@@ -500,6 +547,12 @@ function runJob(job) {
   }
   const args = [...cmd.args, ...agent.args({ cfg: acfg, resume, cwd, system, systemShort, promptFile })];
   const env = agent.env({ ...process.env });
+  // Where this run's tools append map commands (docs/MAP.md); any agent can use it.
+  try {
+    fs.mkdirSync(MAP_DIR, { recursive: true });
+    fs.rmSync(mapFileFor(job), { force: true });
+    env.WOW_AI_MAP_FILE = mapFileFor(job);
+  } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
   log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
@@ -587,6 +640,10 @@ function runJob(job) {
       (state.sessionCwd = state.sessionCwd || {})[skey] = cwd;
       (state.sessionAgent = state.sessionAgent || {})[skey] = agentId;
     }
+    // Map marks count whatever the outcome: the tools already reported them.
+    const mapped = takeMapCommands(job, result ? result.text : '');
+    if (result) result.text = mapped.text;
+    if (mapped.note) notes.push(mapped.note);
     const extra = notes.length ? `\n\n[bridge] ${notes.join('\n\n[bridge] ')}` : '';
     if (result && !result.error) {
       const body = String(result.text || '').trim() || (notes.length ? '' : `(${agent.name} finished without a reply)`);
@@ -630,12 +687,24 @@ function pollSavedVariables() {
   if (job) submit(job);
 }
 
+// Windows: capture.ps1 (GDI). Elsewhere: capture_x11.py (the game runs under Wine on X11).
+function captureCommand() {
+  if (process.platform === 'win32') {
+    return ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'capture.ps1'),
+      '-Cell', String(cap.cellPx), '-Cells', String(cap.cellsPerRow), '-MaxRows', String(cap.maxRows),
+      '-IntervalMs', String(cap.intervalMs), '-ProcessName', cap.processName]];
+  }
+  const args = [path.join(HERE, 'capture_x11.py'),
+    '--cell', String(cap.cellPx), '--cells', String(cap.cellsPerRow), '--max-rows', String(cap.maxRows),
+    '--interval-ms', String(cap.intervalMs), '--process-name', cap.processName];
+  if (cap.windowName) args.push('--window-name', cap.windowName);
+  if (cap.keepComposited) args.push('--keep-composited');
+  return [cap.python || 'python3', args];
+}
+
 function startCapture() {
-  const script = path.join(HERE, 'capture.ps1');
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
-    '-Cell', String(cap.cellPx), '-Cells', String(cap.cellsPerRow), '-MaxRows', String(cap.maxRows),
-    '-IntervalMs', String(cap.intervalMs), '-ProcessName', cap.processName];
-  const ps = spawn('powershell.exe', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [cmd, args] = captureCommand();
+  const ps = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const rl = readline.createInterface({ input: ps.stdout });
   rl.on('line', (line) => {
     let ev;
@@ -650,6 +719,7 @@ function startCapture() {
     }
   });
   ps.stderr.on('data', (d) => log('capture stderr:', String(d).trim().slice(0, 300)));
+  ps.on('error', (err) => log(`capture could not start (${cmd}): ${err.message}`));
   ps.on('close', (code) => {
     log(`capture exited (${code}); restarting in 5 s`);
     setTimeout(startCapture, 5000);

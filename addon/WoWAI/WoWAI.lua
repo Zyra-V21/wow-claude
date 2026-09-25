@@ -796,6 +796,7 @@ local function TryLoadSlot(why)
 	end
 	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
 	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
+	if type(data) == "table" and data.map and WoWAIMap then WoWAIMap.Sync(data.map) end
 	if why == "signal" and not matched then
 		run.signalUnreliable = true
 	end
@@ -900,6 +901,7 @@ local function ProcessInbox()
 	if type(inbox.agents) == "table" and #inbox.agents > 0 then run.bridgeAgents = inbox.agents end
 	ApplyReplies(inbox.replies)
 	if inbox.restore then ImportRestore(inbox.restore) end
+	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
 end
 
 Finish = function(chat, role, text, denied, agent, summary)
@@ -934,7 +936,7 @@ end
 -- are meaningless markup to the agent; their tooltips are what the player sees).
 -- Every game API here is optional: whatever the client lacks is left out.
 
-local CONTEXT_MAX = 700 -- bytes of context per record; the strip has ~3.2 KB for everything
+local CONTEXT_MAX = 900 -- bytes of context per record; the strip has ~3.2 KB for everything
 local LINK_LINES_MAX = 30 -- tooltip lines kept per link
 local LINK_BYTES_MAX = 900 -- bytes kept per link
 
@@ -954,6 +956,44 @@ local function Money(copper)
 end
 
 -- A few lines about the game and the character, as the bridge will show them to the agent.
+-- Profession and secondary skill lines by skill id (vanilla ids).
+local PROFESSION_SKILL_IDS = {
+	[164] = true, [165] = true, [171] = true, [182] = true, [186] = true, [197] = true, [202] = true,
+	[333] = true, [393] = true, [129] = true, [185] = true, [356] = true,
+}
+
+-- The character's skill lines as { name, isHeader, rank, maxRank, skillID }.
+-- Forever only has C_SkillInfo (one table per line); the classic globals
+-- (multiple returns) are the fallback for other clients.
+function WoWAI.SkillLines()
+	local out = {}
+	if C_SkillInfo and C_SkillInfo.GetNumSkillLines then
+		local n = Try(C_SkillInfo.GetNumSkillLines)
+		local seen = {}
+		for i = 1, (type(n) == "number" and n or 0) do
+			local sk = Try(C_SkillInfo.GetSkillLineInfo, i)
+			-- Child lines (parentSkillLineID ~= 0) repeat their parent; Blizzard's
+			-- skills frame skips them too.
+			if type(sk) == "table" and type(sk.name) == "string" and (sk.parentSkillLineID or 0) == 0 then
+				local key = sk.isHeader and ("h:" .. sk.name) or (sk.skillID or sk.name)
+				if not seen[key] then
+					seen[key] = true
+					out[#out + 1] = { name = sk.name, isHeader = sk.isHeader, rank = sk.rank, maxRank = sk.maxRank, skillID = sk.skillID }
+				end
+			end
+		end
+		return out
+	end
+	local n = Try(GetNumSkillLines)
+	for i = 1, (type(n) == "number" and n or 0) do
+		local sname, isHeader, _, rank, _, _, maxRank = Try(GetSkillLineInfo, i)
+		if type(sname) == "string" then
+			out[#out + 1] = { name = sname, isHeader = isHeader and true or false, rank = rank, maxRank = maxRank }
+		end
+	end
+	return out
+end
+
 function WoWAI.GameContext()
 	local lines = {}
 	local version, build, _, toc = Try(GetBuildInfo)
@@ -1033,22 +1073,38 @@ function WoWAI.GameContext()
 	end
 
 	-- Skill lines under the Professions and Secondary Skills headers.
-	local n = Try(GetNumSkillLines)
-	if type(n) == "number" then
-		local header, parts = nil, {}
-		local wanted = { [TRADE_SKILLS or "Professions"] = true, [SECONDARY_SKILLS or "Secondary Skills"] = true }
-		for i = 1, n do
-			local sname, isHeader, _, rank, _, _, maxRank = Try(GetSkillLineInfo, i)
-			if type(sname) == "string" then
-				if isHeader then
-					header = sname
-				elseif header and wanted[header] then
-					table.insert(parts, sname .. (rank and (" " .. tostring(rank) .. (maxRank and ("/" .. tostring(maxRank)) or "")) or ""))
-				end
+	local header, parts = nil, {}
+	local wanted = { [TRADE_SKILLS or "Professions"] = true, [SECONDARY_SKILLS or "Secondary Skills"] = true }
+	for _, sk in ipairs(WoWAI.SkillLines()) do
+		if sk.isHeader then
+			header = sk.name
+		elseif (header and wanted[header]) or PROFESSION_SKILL_IDS[sk.skillID] then
+			table.insert(parts, sk.name .. (sk.rank and (" " .. tostring(sk.rank) .. (sk.maxRank and ("/" .. tostring(sk.maxRank)) or "")) or ""))
+		end
+	end
+	if #parts > 0 then table.insert(lines, "Professions: " .. table.concat(parts, ", ")) end
+
+	-- Quest log ids (what is accepted, and which are done), so route planning can
+	-- skip pickups and turn-ins that no longer apply.
+	local quests = {}
+	local qn = Try(C_QuestLog and C_QuestLog.GetNumQuestLogEntries) or Try(GetNumQuestLogEntries)
+	if type(qn) == "number" then
+		for i = 1, math.min(qn, 40) do
+			local id, header, complete
+			local info = Try(C_QuestLog and C_QuestLog.GetInfo, i)
+			if type(info) == "table" then
+				id, header = info.questID, info.isHeader
+				complete = Try(C_QuestLog.IsComplete, id)
+			else
+				local _, _, _, isHeader, _, isComplete, _, qid = Try(GetQuestLogTitle, i)
+				id, header, complete = qid, isHeader, isComplete == 1 or isComplete == true
+			end
+			if not header and type(id) == "number" and id > 0 then
+				table.insert(quests, tostring(id) .. (complete and "*" or ""))
 			end
 		end
-		if #parts > 0 then table.insert(lines, "Professions: " .. table.concat(parts, ", ")) end
 	end
+	if #quests > 0 then table.insert(lines, "Quest log (id, * = ready to turn in): " .. table.concat(quests, ",")) end
 
 	local s = table.concat(lines, "\n"):gsub("[\30\31]", " ")
 	if #s > CONTEXT_MAX then s = s:sub(1, CONTEXT_MAX) end
@@ -2592,6 +2648,7 @@ local HELP = table.concat({
 	"/wow-ai agent [name]           which agent this chat talks to: claude, codex or grok (no name = show; default = the bridge's). Right-clicking the chat and picking Agent does the same",
 	"/wow-ai reset                  next message in this chat starts a fresh agent session",
 	"/wow-ai context [on|off]       what the agent is told about your character and where you are (no argument = show it)",
+	"/wow-ai map [...]              map layers the agent drew, the route navigator and herb/ore nodes (no argument = status and subcommands; /aimap is the same)",
 	"/wow-ai mode pixel             no-reload transport (default)",
 	"/wow-ai mode reload            fallback transport: a /reload per step",
 	"/wow-ai resend                 show the strip again if the bridge missed it",
@@ -2633,6 +2690,7 @@ local COMMAND_ARGS = {
 	bind = 1, agent = 1,
 	chat = ChatArgument, chats = ChatArgument,
 	cd = true, new = true, rename = true,
+	map = true, -- /wow-ai map ...: Map.lua (layers, navigator, herb/ore nodes)
 }
 
 local function IsCommand(cmd, rest)
@@ -2707,6 +2765,8 @@ SlashCmdList["WOWAI"] = function(msg)
 	elseif cmd == "cd" then
 		WoWAI.SetFolder(rest, c)
 		WoWAI.Toggle(true)
+	elseif cmd == "map" then
+		if WoWAIMap then WoWAIMap.Command(rest) else print("|cff66ccff[WoW AI]|r the map module did not load") end
 	elseif cmd == "agent" then
 		WoWAI.SetAgent(rest, c)
 		WoWAI.Toggle(true)
