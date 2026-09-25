@@ -4,10 +4,13 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-24
+
 This release renames the project from **wow-claude** to **WoW AI** (`wow-ai`) and adds two more agents next to Claude Code. Existing installs: `git pull`, `node setup.js` (it migrates the saved data, removes the old addon and updates `config.json`), then quit and relaunch the game. See "Upgrading from wow-claude" in `docs/INSTALL-WINDOWS.md`.
 
 ### Added
 
+- **Short replies in the game chat, the full reply in the window.** The system prompt now goes out on every run (game context or not) and asks the agent to end each reply with a `TL;DR:` block of one or two lines; the bridge splits it off (`protocol.splitSummary`) and sends it as `summary` in the slot record next to the full `text`. The new `/wow-ai echo summary` mode, now the default, prints only those lines under `[Claude · chat]` with the `[open]` link to the whole reply; a reply without the block shows its first two lines and a hint to open the rest. Installs that still had the old `full` default saved move to `summary` once; `/wow-ai echo full` brings the old behaviour back.
 - **Codex and Grok Build** next to Claude Code. `bridge/agents.js` holds one entry per agent (its command line, how the prompt is handed over, a parser for its output stream), `agent` in `config.json` is the default, and each chat can pick its own with `/wow-ai agent <name>` or the **Agent...** item in the chat's right-click menu (an `agent=` flag on the strip record and in the reload-path outbox). Bubbles, the game-chat echo and the `/r` header name the agent that answered; sessions are kept per agent and folder, so a chat that switches agent starts a fresh session. Per-agent settings live under `agents.<id>` (`permissionMode`, `allowedTools`, `model`, `path`, `extraArgs`; `networkAccess` for Codex). Codex runs `codex exec --json` in a sandbox chosen from `permissionMode`, with the game context at the top of the prompt since it has no system-prompt flag; Grok runs `grok --prompt-file … --output-format streaming-json` with `--permission-mode dontAsk` and the allowlist translated to its globs (headless Grok runs ordinary commands on its own and blocks dangerous ones unless a rule allows them), or `--always-approve`; `deniedTools` adds deny rules for Claude and Grok. Grok's refused tool calls feed the Allow button like Claude's denials; Codex explains a sandbox-blocked command in its own words. Both were tested live against codex 0.156.1 and Grok Build 1.0.41. The banner lists each agent's executable or what to install, `--agent` picks one for `--inject`, and `npm run test:live -- --agent codex` tries one without the game.
 - On Windows the bridge unwraps npm's `.cmd` launchers (Codex, or Claude installed with npm) into the script or native binary they run, instead of spawning through `cmd.exe`, and a run that hits `timeoutMs` is killed together with its child processes.
 - `docs/AGENTS.md`: per-agent install, command lines, what each permission mode means, limits, and how to add another agent. `tests/agents_test.js` covers the command lines and each CLI's stream format.
@@ -56,5 +59,6 @@ First public release.
 - `setup.js` installer: finds the client, copies the addon, writes `config.json`, builds the slot pool.
 - Test suite: addon in a Lua VM with a stub client, protocol unit tests, slot-file round trip, codec-to-decoder round trip, and a live inject test.
 
-[Unreleased]: https://github.com/chelinho139/wow-ai/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/chelinho139/wow-ai/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/chelinho139/wow-ai/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/chelinho139/wow-ai/releases/tag/v0.3.0

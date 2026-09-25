@@ -199,7 +199,14 @@ local function InitDB()
 	if s.autoRefresh == nil then s.autoRefresh = true end
 	if s.signal == nil then s.signal = true end
 	if s.context == nil then s.context = true end -- tell the agent about the character, zone, etc.
-	s.echo = s.echo or "full" -- how much of each reply to print in the game chat
+	-- How much of each reply to print in the game chat. "summary" (the agent's
+	-- closing TL;DR lines) replaced "full" as the default; an install that still
+	-- has the old default saved moves over once, any other choice is kept.
+	if not s.echoV2 then
+		s.echoV2 = true
+		if s.echo == "full" then s.echo = "summary" end
+	end
+	s.echo = s.echo or "summary"
 	s.mode = s.mode or "pixel"
 	s.interval = s.interval or 20
 	s.cwd = s.cwd or DEFAULT_CWD
@@ -703,7 +710,7 @@ local function ApplyReplies(replies)
 			MarkAcked(r.id)
 			local denied = type(r.denied) == "table" and #r.denied > 0 and r.denied or nil
 			if r.status == "done" then
-				Finish(c, "assistant", r.text or "", denied, r.agent)
+				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary)
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
 			elseif r.status == "working" then
@@ -895,7 +902,7 @@ local function ProcessInbox()
 	if inbox.restore then ImportRestore(inbox.restore) end
 end
 
-Finish = function(chat, role, text, denied, agent)
+Finish = function(chat, role, text, denied, agent, summary)
 	AddHistory(chat, role, text, chat.pendingId, denied, agent)
 	chat.pendingId = nil
 	chat.progress = nil
@@ -913,7 +920,7 @@ Finish = function(chat, role, text, denied, agent)
 		chat.draft = nil
 	end
 	WoWAI.Render()
-	WoWAI.Notify(chat, text, agent)
+	WoWAI.Notify(chat, text, agent, summary)
 end
 
 ---------------------------------------------------------------------------
@@ -1872,9 +1879,15 @@ local function ChatLinks(chat)
 	return "  |Hwowai:reply:" .. chat.id .. "|h|cff55ff55[reply]|r|h |Hwowai:open:" .. chat.id .. "|h|cff7ec8ff[open]|r|h"
 end
 
+local SUMMARY_LINES = 3 -- lines of the agent's TL;DR block printed in "summary" mode
+local SUMMARY_FALLBACK_LINES = 2 -- lines of the reply shown when it came without one
+
 -- Print a reply into the game chat: prefix on the first line, then the text line
 -- by line up to the limit, then clickable links. `short` prints one preview line.
-local function EchoToChat(chat, text, agent)
+-- `summary` (the default) prints the TL;DR block the bridge split off the reply,
+-- or the first lines of the reply when the agent didn't write one; the full text
+-- is in the window, behind [open].
+local function EchoToChat(chat, text, agent, summary)
 	local mode = db.settings.echo
 	if mode == "off" then return end
 	local prefix = "|cff7ec8ff[" .. ReplyAgentName(chat, agent) .. " · " .. Display(chat.name) .. "]|r "
@@ -1883,6 +1896,25 @@ local function EchoToChat(chat, text, agent)
 		local flat = (body:gsub("%s+", " "))
 		if #flat > 200 then flat = flat:sub(1, 200) .. " ..." end
 		print(prefix .. flat .. ChatLinks(chat))
+		return
+	end
+	if mode == "summary" then
+		local source, max = Display(summary or ""), SUMMARY_LINES
+		if not source:match("%S") then source, max = body, SUMMARY_FALLBACK_LINES end
+		local lines, total = {}, 0
+		for line in (source .. "\n"):gmatch("(.-)\n") do
+			if line:match("%S") then
+				total = total + 1
+				if total <= max then table.insert(lines, line) end
+			end
+		end
+		for i, line in ipairs(lines) do
+			print((i == 1 and prefix or "    ") .. line)
+		end
+		if total > max then
+			print("    |cff888888... click [open] to read it all|r")
+		end
+		print("    " .. ChatLinks(chat):sub(3))
 		return
 	end
 	local limit = tonumber(mode) or ECHO_DEFAULT
@@ -1903,13 +1935,13 @@ end
 
 -- A reply landed. Always play the sound and echo it to the game chat; if that
 -- chat isn't on screen, also flash the screen text and light up the mini bar.
-function WoWAI.Notify(chat, text, agent)
+function WoWAI.Notify(chat, text, agent, summary)
 	pcall(PlaySound, 3081)
 	WoWAI.UpdateMini()
 	-- Until a real whisper arrives, /r replies to this chat.
 	run.lastMessenger = "agent"
 	run.lastReplyChat = chat.id
-	EchoToChat(chat, text, agent)
+	EchoToChat(chat, text, agent, summary)
 	if ui.frame and ui.frame:IsShown() and db.activeChat == chat.id then return end
 	if UIErrorsFrame then
 		UIErrorsFrame:AddMessage(ReplyAgentName(chat, agent) .. " replied in " .. Display(chat.name), 0.5, 0.8, 1, 1)
@@ -2550,7 +2582,7 @@ local HELP = table.concat({
 	"/wow-ai hide                   hide the window completely",
 	"/ai <text>                         send <text> to the current chat straight from the game chat box (/wow-ai <text> too). A message that starts with a command word is still sent when the rest of the line doesn't fit that command",
 	"/r <text>                          replies to the agent when it was the last to message you (else normal whisper reply)",
-	"/wow-ai echo full|short|off|<chars>   how much of each reply to print in the game chat",
+	"/wow-ai echo summary|full|short|off|<chars>   how much of each reply to print in the game chat (summary = the agent's closing TL;DR lines)",
 	"/wow-ai longchat on|off        let the game chat box take 4000 characters (for long /ai messages)",
 	"/wow-ai new [name]             start a new chat (its own agent session, like a new terminal)",
 	"/wow-ai chat <n|name>          switch chats (or click one in the left panel)",
@@ -2597,7 +2629,7 @@ local COMMAND_ARGS = {
 	mode = { [""] = true, pixel = true, reload = true },
 	signal = { [""] = true, on = true, off = true }, longchat = { [""] = true, on = true, off = true },
 	auto = OnOffOrNumber,
-	echo = function(rest) return rest == "" or rest == "full" or rest == "short" or rest == "off" or tonumber(rest) ~= nil end,
+	echo = function(rest) return rest == "" or rest == "summary" or rest == "full" or rest == "short" or rest == "off" or tonumber(rest) ~= nil end,
 	bind = 1, agent = 1,
 	chat = ChatArgument, chats = ChatArgument,
 	cd = true, new = true, rename = true,
@@ -2733,12 +2765,12 @@ SlashCmdList["WOWAI"] = function(msg)
 			end
 		end
 	elseif cmd == "echo" then
-		if rest == "full" or rest == "short" or rest == "off" then
+		if rest == "summary" or rest == "full" or rest == "short" or rest == "off" then
 			s.echo = rest
 		elseif tonumber(rest) then
 			s.echo = tostring(math.max(200, math.floor(tonumber(rest))))
 		end
-		AddHistory(c, "system", "replies in game chat: " .. s.echo .. " (full = " .. ECHO_DEFAULT .. " chars, short, off, or a number of characters)")
+		AddHistory(c, "system", "replies in game chat: " .. s.echo .. " (summary = the agent's TL;DR lines, full = " .. ECHO_DEFAULT .. " chars, short, off, or a number of characters)")
 		WoWAI.Render()
 	elseif cmd == "longchat" then
 		if rest == "on" then s.longchat = true elseif rest == "off" then s.longchat = false end

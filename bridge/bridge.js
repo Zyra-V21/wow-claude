@@ -501,7 +501,7 @@ function runJob(job) {
   const args = [...cmd.args, ...agent.args({ cfg: acfg, resume, cwd, system, systemShort, promptFile })];
   const env = agent.env({ ...process.env });
 
-  log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${system ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
+  log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   running.set(key, { job, child });
   publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
@@ -605,10 +605,14 @@ function finish(job, status, text, session, denied) {
   running.delete(chatKey(job));
   markHandled(job);
   saveState();
+  // A finished reply ends with the "TL;DR:" block the system prompt asks for:
+  // that part is what the game chat prints; the window gets the whole reply.
+  let summary = '';
+  if (status === 'done') ({ text, summary } = P.splitSummary(text));
   noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
-  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, cwd: job.cwd, session, denied, agent: job.agent || '' }, true);
+  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, agent: job.agent || '' }, true);
   signal('sig', job.id, true);
-  log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars)`);
+  log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars${summary ? ', summary ' + summary.length : ', no summary'})`);
   drainQueue();
   if (exitWhenIdle && running.size === 0) process.exit(status === 'done' ? 0 : 1);
 }

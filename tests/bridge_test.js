@@ -57,19 +57,43 @@ test('jobsFromStrip reads the game context field only when the flags say so', ()
   assert.equal(short.text, 'only text');
 });
 
-test('systemPrompt wraps the game context and is empty without one', () => {
-  assert.equal(P.systemPrompt(''), '');
-  assert.equal(P.systemPrompt('  \n '), '');
-  assert.equal(P.systemPrompt(undefined), '');
+test('systemPrompt always asks for the TL;DR block, and wraps the game context and primer when given', () => {
+  // Without a context the prompt is only the reply-format rule.
+  for (const empty of ['', '  \n ', undefined]) {
+    const s = P.systemPrompt(empty);
+    assert.ok(s.includes('wow-ai addon'));
+    assert.ok(s.includes('"TL;DR:"'), 'asks for the summary marker');
+    assert.ok(!s.includes('in-game situation'), 'no context section without a context');
+    assert.ok(!s.includes('Reference for writing addons'), 'no primer section without a context');
+  }
   const s = P.systemPrompt('Game: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter');
-  assert.ok(s.includes('wow-ai addon'));
+  assert.ok(s.includes('"TL;DR:"'));
   assert.ok(s.includes('\nGame: World of Warcraft: Forever\nCharacter: Testchar, level 23 Hunter\n'));
   assert.ok(s.includes('Linked from the game'));
   assert.ok(!s.includes('Reference for writing addons'), 'no primer section without a primer');
   // The primer rides with the context, and only with it.
   const withPrimer = P.systemPrompt('Character: Testchar', '# Primer\n\nUse local.');
   assert.ok(withPrimer.endsWith('Reference for writing addons and macros for this client. Follow it when the task is about WoW, and check anything it marks as uncertain against the Blizzard UI source it names:\n\n# Primer\n\nUse local.'));
-  assert.equal(P.systemPrompt('', '# Primer'), '');
+  assert.ok(!P.systemPrompt('', '# Primer').includes('# Primer'));
+});
+
+test('splitSummary takes the last TL;DR block for the game chat and keeps the whole reply for the window', () => {
+  const reply = 'Renamed the function.\n\nDetails:\n- foo.js\n- bar.js\n\n---\n**TL;DR:** Renamed doIt to run in foo.js and bar.js.\nTests pass.';
+  const r = P.splitSummary(reply);
+  assert.equal(r.summary, 'Renamed doIt to run in foo.js and bar.js.\nTests pass.');
+  assert.equal(r.text, reply);
+  assert.deepEqual(P.splitSummary('no marker here'), { text: 'no marker here', summary: '' });
+  assert.deepEqual(P.splitSummary(''), { text: '', summary: '' });
+  assert.deepEqual(P.splitSummary(undefined), { text: '', summary: '' });
+  // Headings, missing colon, no bold, and a marker that is not at a line start.
+  assert.equal(P.splitSummary('a\n## TL;DR\nsum').summary, 'sum');
+  assert.equal(P.splitSummary('a\ntldr: sum').summary, 'sum');
+  assert.equal(P.splitSummary('a TL;DR: inline\nmore').summary, '');
+  assert.equal(P.splitSummary('first TL;DR: x\n\nbody\n\nTL;DR: last one').summary, 'last one');
+  // The slot file carries the summary only when there is one.
+  const lua = P.luaTable('WoWAI_SlotData', [{ chat: 'c', id: 1, status: 'done', text: 'body\nTL;DR: short', summary: 'short' }, { chat: 'c', id: 2, status: 'done', text: 'plain' }]);
+  assert.ok(lua.includes('summary = "short"'));
+  assert.equal((lua.match(/summary = /g) || []).length, 1);
 });
 
 test('the shipped primer exists, mentions the essentials, and stays small enough to send on every run', () => {
