@@ -250,6 +250,9 @@ test('quest steps move on when the game reports them done', () => {
   vm.run('STUB.qlog[845].objectives[1] = { text = "4/4 Zhevra Hooves", finished = true }; STUB.FireEvent("QUEST_LOG_UPDATE"); STUB.RunTimers()');
   assert.equal(navIndex(vm), '3');
   assert.match(vm.evaluate('STUB.prints[#STUB.prints]'), /done: 2\. loot Zhevra Hooves.*Next: 3\. turn in/);
+  // Done steps leave the world map: only the turn-in (current) and the ore stop remain.
+  vm.run('STUB.shownMap = 1432; WoWAIMap.Refresh()');
+  assert.deepEqual(shownPins(vm).map(p => p.split(',')[2]), ['3', '4']);
   // Turning in: straight from the event (the completed flag lags behind it).
   vm.run('STUB.qlog[845] = nil; STUB.FireEvent("QUEST_TURNED_IN", 845); STUB.RunTimers()');
   assert.equal(navIndex(vm), '4', 'on to the next, non-quest stop');

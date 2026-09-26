@@ -325,15 +325,18 @@ function M.Refresh()
 			for i, p in ipairs(l.points) do
 				local x, y = Project(p[1], p[2] / 100, p[3] / 100, mapID)
 				local inside = x and x >= 0 and x <= 1 and y >= 0 and y <= 1
-				if inside then
+				local current = nav and nav.layer == l.name and nav.index == i
+				-- Quest steps already done leave the map (the one you picked stays).
+				local done = not current and StepDone(p, cache) == true
+				if done then
+					prev = nil
+				elseif inside then
 					local color = KIND_COLOR[p[5]] or KIND_COLOR.poi
 					if l.ordered and prev then AddLine(prev[1], prev[2], x, y, color, 2.5 * scale) end
 					pinCount = pinCount + 1
 					local b = pins[pinCount]
 					if not b then b = NewPin(PIN_SIZE); pins[pinCount] = b end
-					local current = nav and nav.layer == l.name and nav.index == i
-					local done = StepDone(p, cache) == true
-					b.dot:SetVertexColor(color[1], color[2], color[3], done and 0.3 or 1)
+					b.dot:SetVertexColor(color[1], color[2], color[3], 1)
 					b.ring:SetVertexColor(current and 1 or 0, current and 1 or 0, current and 1 or 0, 0.9)
 					b.num:SetText(l.ordered and tostring(i) or "")
 					b:SetFrameLevel(overlay:GetFrameLevel() + (current and 20 or 10))
