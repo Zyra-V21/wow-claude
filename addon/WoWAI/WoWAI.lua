@@ -1085,7 +1085,9 @@ local function QuestLogEntries(withNames)
 			else
 				local objs = {}
 				for _, o in ipairs(Try(C_QuestLog.GetQuestObjectives, id) or {}) do
-					local name = withNames and Clean((o.text or ""):gsub(":?%s*%d+%s*/%s*%d+%s*$", ""), 20) or ""
+					-- "4/4 Zhevra Hooves" on this client, "Zhevra Hooves: 4/4" on older ones.
+					local bare = (o.text or ""):gsub("^%s*%d+%s*/%s*%d+%s*", ""):gsub(":?%s*%d+%s*/%s*%d+%s*$", "")
+					local name = withNames and Clean(bare, 20) or ""
 					local prog = o.finished and "done" or (tostring(o.numFulfilled or 0) .. "/" .. tostring(o.numRequired or 1))
 					objs[#objs + 1] = (name ~= "" and (name .. " ") or "") .. prog
 				end
