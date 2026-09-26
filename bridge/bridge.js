@@ -374,7 +374,41 @@ function presenceBeat() {
 function readOutbox() {
   let src;
   try { src = fs.readFileSync(SAVED_VARS, 'utf8'); } catch { return null; }
+  readQuestHistory(src);
   return P.parseOutbox(src);
+}
+
+// Completed quests per character, from the addon's saved data (written on logout
+// and /reload). Kept in state.json so a wiped saved-data file doesn't lose them.
+function readQuestHistory(src) {
+  const found = P.parseQuestsDone(src);
+  const keys = Object.keys(found);
+  if (!keys.length) return;
+  state.questsDone = state.questsDone || {};
+  let changed = false;
+  for (const k of keys) {
+    const cur = state.questsDone[k];
+    if (!cur || found[k].at >= (cur.at || 0)) {
+      if (!cur || cur.ids.length !== found[k].ids.length || cur.at !== found[k].at) changed = true;
+      state.questsDone[k] = found[k];
+    }
+  }
+  if (changed) {
+    saveState();
+    log(`quest history: ${keys.map(k => `${k} ${found[k].ids.length} completed`).join(', ')}`);
+  }
+}
+
+// What the agent's tools read (WOW_AI_GAME_STATE): character, position, quest
+// log with progress, and every completed quest. Written before each run.
+const GAME_STATE_FILE = path.join(HERE, 'gamestate.json');
+function writeGameState() {
+  const ctx = gameContext();
+  if (!ctx) return null;
+  try {
+    atomicWrite(GAME_STATE_FILE, JSON.stringify(P.buildGameState(ctx, state.questsDone, state.context && state.context.at), null, 1));
+    return GAME_STATE_FILE;
+  } catch (e) { log(`game state not written: ${e.message}`); return null; }
 }
 
 // The addon sends the player's in-game context (character, location, ...) with
@@ -553,6 +587,8 @@ function runJob(job) {
     fs.rmSync(mapFileFor(job), { force: true });
     env.WOW_AI_MAP_FILE = mapFileFor(job);
   } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
+  const gameState = writeGameState();
+  if (gameState) env.WOW_AI_GAME_STATE = gameState;
 
   log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });

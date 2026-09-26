@@ -226,7 +226,9 @@ function systemPrompt(ctx, primer) {
       '',
       ...MAP_HINT,
       '',
-      ...MACRO_HINT);
+      ...MACRO_HINT,
+      '',
+      ...QUEST_HINT);
   }
   const ref = text ? String(primer || '').trim() : '';
   if (ref) {
@@ -546,6 +548,135 @@ function luaMacros(macros) {
   return `\t\t\tmacros = { ${macros.map(m => `{ name = ${luaStr(m.name)}, body = ${luaStr(m.body)}, icon = ${m.icon == null ? 'nil' : typeof m.icon === 'number' ? m.icon : luaStr(m.icon)}, char = ${m.char ? 'true' : 'false'}, risky = ${m.risky ? 'true' : 'false'} }`).join(', ')} },`;
 }
 
+// ---------------------------------------------------------------------------
+// Quest state
+// ---------------------------------------------------------------------------
+//
+// The addon puts the quest log (each objective's progress) and the quests turned
+// in since login into the game context, and the character's full completed set
+// into its saved data (base-36 ranges, written on logout and /reload). The bridge
+// joins them into one game-state file for the agent's tools.
+
+const QUEST_HINT = [
+  'The "Quests" line of the context is the live quest log: quest id, then each objective as "<name> have/need" or "done"; "*" means ready to turn in, "!" means failed (abandon and take it again). The full game state, including every quest this character has completed, is the JSON file named by the WOW_AI_GAME_STATE environment variable: plan leveling from it and never send the player to pick up or do a quest that is completed or already in their log.',
+];
+
+// "1-5,7,9-c" (base 36) -> [1,2,3,4,5,7,9,10,11,12]
+function decodeRanges(s) {
+  const out = [];
+  for (const part of String(s || '').split(',')) {
+    if (!part) continue;
+    const [a, b] = part.split('-').map(x => parseInt(x, 36));
+    if (!Number.isFinite(a)) continue;
+    const end = Number.isFinite(b) ? b : a;
+    if (end - a > 100000) continue; // corrupt range: skip rather than blow up
+    for (let i = a; i <= end; i++) out.push(i);
+  }
+  return out;
+}
+
+function encodeRanges(ids) {
+  const s = [...new Set(ids)].sort((x, y) => x - y);
+  const parts = [];
+  for (let i = 0; i < s.length;) {
+    let j = i;
+    while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+    parts.push(j === i ? s[i].toString(36) : `${s[i].toString(36)}-${s[j].toString(36)}`);
+    i = j + 1;
+  }
+  return parts.join(',');
+}
+
+// The addon's saved data holds questsDone = { ["Name-Realm"] = { ids = "...", n = 57, at = <epoch> } }.
+function parseQuestsDone(src) {
+  const text = String(src || '');
+  const start = text.search(/\["questsDone"\]\s*=\s*\{/);
+  if (start < 0) return {};
+  let i = text.indexOf('{', start), depth = 0, end = -1;
+  for (; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) { end = i; break; }
+  }
+  const block = text.slice(text.indexOf('{', start) + 1, end < 0 ? text.length : end);
+  const out = {};
+  for (const m of block.matchAll(/\["((?:[^"\\]|\\.)*)"\]\s*=\s*\{([^{}]*)\}/g)) {
+    const body = m[2];
+    const ids = (body.match(/\["ids"\]\s*=\s*"([0-9a-z,-]*)"/) || [])[1];
+    if (ids === undefined) continue;
+    out[m[1].replace(/\\(.)/g, '$1')] = {
+      ids: decodeRanges(ids),
+      at: Number((body.match(/\["at"\]\s*=\s*(\d+)/) || [])[1]) || 0,
+    };
+  }
+  return out;
+}
+
+const RACE_NAMES = ['Night Elf', 'Human', 'Dwarf', 'Gnome', 'Orc', 'Undead', 'Tauren', 'Troll', 'Blood Elf', 'Draenei', 'Goblin', 'Worgen', 'Pandaren'];
+
+// Everything the context says about the character and their quests.
+function parseGameContext(ctx) {
+  const text = String(ctx || '');
+  const line = re => { const m = text.match(re); return m ? m : null; };
+  const st = { character: null, level: null, race: null, class: null, faction: null, zone: null, position: null, professions: {}, quests: null, turnedIn: [], historyMissing: /Completed quest history: not on disk/.test(text) };
+  const ch = line(/^Character: (.+?)(?: on (.+?))?, level (\d+) (.+?)(?: \((\w+)\))?(?:, guild <.*>)?$/m);
+  if (ch) {
+    st.character = { name: ch[1], realm: ch[2] || '', key: `${ch[1]}-${ch[2] || ''}` };
+    st.level = Number(ch[3]);
+    const rc = ch[4];
+    const race = RACE_NAMES.find(r => rc.startsWith(r + ' '));
+    st.race = race || rc.split(' ')[0];
+    st.class = race ? rc.slice(race.length + 1) : rc.split(' ').slice(1).join(' ');
+    st.faction = ch[5] || null;
+  }
+  const xp = line(/XP: (\d+)\/(\d+)/);
+  if (xp) st.xp = { have: Number(xp[1]), need: Number(xp[2]) };
+  const loc = line(/^Location: (.+)$/m);
+  if (loc) st.zone = loc[1].split(' - ')[0];
+  const pos = line(/^Position: ([\d.]+), ([\d.]+)(?: on .+?)? \(map (\d+)\)$/m);
+  if (pos) st.position = { map: Number(pos[3]), x: Number(pos[1]), y: Number(pos[2]) };
+  const prof = line(/^Professions: (.+)$/m);
+  if (prof) for (const p of prof[1].split(', ')) {
+    const m = p.match(/^(.+?) (\d+)(?:\/(\d+))?$/);
+    if (m) st.professions[m[1]] = Number(m[2]);
+  }
+  const q = line(/^Quests \([^)]*\): (.+)$/m);
+  if (q) {
+    st.quests = [];
+    if (q[1] !== 'none') for (const e of q[1].split('; ')) {
+      const m = e.match(/^(\d+)([*!]?)(?: (.*))?$/);
+      if (!m) continue;
+      const entry = { id: Number(m[1]), status: m[2] === '*' ? 'complete' : m[2] === '!' ? 'failed' : 'active', objectives: [] };
+      for (const o of (m[3] || '').split(', ').filter(Boolean)) {
+        const om = o.match(/^(?:(.*?) )?(?:(\d+)\/(\d+)|(done))$/);
+        if (!om) continue;
+        entry.objectives.push(om[4] ? { name: om[1] || '', done: true } : { name: om[1] || '', have: Number(om[2]), need: Number(om[3]), done: Number(om[2]) >= Number(om[3]) });
+      }
+      st.quests.push(entry);
+    }
+  }
+  const ti = line(/^Turned in since login: ([\d,]+)$/m);
+  if (ti) st.turnedIn = ti[1].split(',').map(Number).filter(Number.isFinite);
+  return st;
+}
+
+// The file the agent's tools read: the parsed context plus the completed set
+// (saved data for this character, joined with what was turned in since login).
+function buildGameState(ctx, questsDone, ctxAt) {
+  const st = parseGameContext(ctx);
+  const saved = st.character && questsDone ? questsDone[st.character.key] : null;
+  const completed = new Set([...(saved ? saved.ids : []), ...st.turnedIn]);
+  return {
+    at: ctxAt ? new Date(ctxAt).toISOString() : null,
+    ...st,
+    completed: {
+      known: !!saved,
+      savedAt: saved && saved.at ? new Date(saved.at * 1000).toISOString() : null,
+      count: completed.size,
+      ids: [...completed].sort((a, b) => a - b),
+    },
+  };
+}
+
 module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
   alreadyHandled, markHandled, pruneStale, MONTH_MS,
@@ -555,4 +686,5 @@ module.exports = {
   luaStr, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
   MACRO_LIMITS, MACRO_DEFAULT_ICON, extractMacros, stripMacroBlocks, luaMacros,
+  decodeRanges, encodeRanges, parseQuestsDone, parseGameContext, buildGameState,
 };

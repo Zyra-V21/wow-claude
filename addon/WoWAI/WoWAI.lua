@@ -936,7 +936,7 @@ end
 -- are meaningless markup to the agent; their tooltips are what the player sees).
 -- Every game API here is optional: whatever the client lacks is left out.
 
-local CONTEXT_MAX = 900 -- bytes of context per record; the strip has ~3.2 KB for everything
+local CONTEXT_MAX = 1700 -- bytes of context per record; the strip has ~3.2 KB for everything
 local LINK_LINES_MAX = 30 -- tooltip lines kept per link
 local LINK_BYTES_MAX = 900 -- bytes kept per link
 
@@ -992,6 +992,127 @@ function WoWAI.SkillLines()
 		end
 	end
 	return out
+end
+
+---------------------------------------------------------------------------
+-- Quest state
+---------------------------------------------------------------------------
+
+-- What the agent needs to plan quests from where the player really is: every
+-- quest in the log with each objective's progress (in the context, so it always
+-- arrives with the message it informs), and the character's completed quests.
+-- The completed set can be thousands of ids, too big for the strip: it goes into
+-- saved data (the bridge reads the file on logout or /reload), plus an absolute
+-- list of quests turned in since login in the context. Their union is the full
+-- history, with no deltas that could be applied to the wrong base.
+
+local QUEST_LINE_MAX = 900 -- bytes of the "Quests:" line; objective names go first when it overflows
+
+local function CharKey()
+	local name, realm = Try(UnitName, "player"), Try(GetRealmName)
+	if not name then return nil end
+	return name .. "-" .. (realm or "")
+end
+
+local B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+local function ToBase36(n)
+	if n == 0 then return "0" end
+	local out = ""
+	while n > 0 do
+		local d = n % 36
+		out = B36:sub(d + 1, d + 1) .. out
+		n = math.floor(n / 36)
+	end
+	return out
+end
+
+-- Sorted ids as base-36 ranges: "1-5,7,9-c".
+function WoWAI.EncodeRanges(ids)
+	table.sort(ids)
+	local parts, i = {}, 1
+	while i <= #ids do
+		local j = i
+		while j < #ids and ids[j + 1] == ids[j] + 1 do j = j + 1 end
+		if ids[j] == ids[i] then parts[#parts + 1] = ToBase36(ids[i])
+		else parts[#parts + 1] = ToBase36(ids[i]) .. "-" .. ToBase36(ids[j]) end
+		i = j + 1
+	end
+	return table.concat(parts, ",")
+end
+
+local function CompletedQuestIDs()
+	local list = Try(C_QuestLog and C_QuestLog.GetAllCompletedQuestIDs)
+	if type(list) == "table" then return list end
+	local map = Try(GetQuestsCompleted)
+	if type(map) == "table" then
+		local out = {}
+		for id, done in pairs(map) do if done then out[#out + 1] = id end end
+		return out
+	end
+end
+
+-- Put the completed set in saved data (written to disk on logout and /reload).
+function WoWAI.SaveQuestHistory()
+	local key = CharKey()
+	local ids = key and CompletedQuestIDs()
+	if not ids then return end
+	db.questsDone = db.questsDone or {}
+	db.questsDone[key] = { ids = WoWAI.EncodeRanges(ids), n = #ids, at = time() }
+end
+
+local function Clean(s, max)
+	s = tostring(s or ""):gsub("[;,%c|]", " "):gsub("%s+", " ")
+	s = s:gsub("^%s+", ""):gsub("%s+$", "")
+	if #s > max then s = s:sub(1, max) end
+	return s
+end
+
+-- "Quests: 33 Tough Wolf Meat 4/8; 62*; 783!": id, then each objective as
+-- "<name> have/need" (or "done"), * = ready to turn in, ! = failed.
+local function QuestLogEntries(withNames)
+	local entries = {}
+	local n = Try(C_QuestLog and C_QuestLog.GetNumQuestLogEntries)
+	if type(n) ~= "number" then return nil end -- a client without the quest API: say nothing
+	for i = 1, math.min(n, 60) do
+		local info = Try(C_QuestLog.GetInfo, i)
+		local id = type(info) == "table" and not info.isHeader and info.questID
+		if type(id) == "number" and id > 0 then
+			local e = tostring(id)
+			if Try(C_QuestLog.IsFailed, id) then
+				e = e .. "!"
+			elseif Try(C_QuestLog.IsComplete, id) then
+				e = e .. "*"
+			else
+				local objs = {}
+				for _, o in ipairs(Try(C_QuestLog.GetQuestObjectives, id) or {}) do
+					local name = withNames and Clean((o.text or ""):gsub(":?%s*%d+%s*/%s*%d+%s*$", ""), 20) or ""
+					local prog = o.finished and "done" or (tostring(o.numFulfilled or 0) .. "/" .. tostring(o.numRequired or 1))
+					objs[#objs + 1] = (name ~= "" and (name .. " ") or "") .. prog
+				end
+				if #objs > 0 then e = e .. " " .. table.concat(objs, ", ") end
+			end
+			entries[#entries + 1] = e
+		end
+	end
+	return entries
+end
+
+function WoWAI.QuestContextLines()
+	local lines = {}
+	local entries = QuestLogEntries(true)
+	if not entries then return lines end
+	local text = table.concat(entries, "; ")
+	if #text > QUEST_LINE_MAX then text = table.concat(QuestLogEntries(false), "; ") end
+	if #text > QUEST_LINE_MAX then text = text:sub(1, QUEST_LINE_MAX):gsub(";[^;]*$", "") .. "; ..." end
+	lines[#lines + 1] = "Quests (id, objectives, * ready to turn in, ! failed): " .. (text ~= "" and text or "none")
+	if run.turnedIn and #run.turnedIn > 0 then
+		lines[#lines + 1] = "Turned in since login: " .. table.concat(run.turnedIn, ",")
+	end
+	local key = CharKey()
+	if key and not run.historyOnDisk and CompletedQuestIDs() then
+		lines[#lines + 1] = "Completed quest history: not on disk yet (a /reload saves it for the bridge)"
+	end
+	return lines
 end
 
 function WoWAI.GameContext()
@@ -1084,27 +1205,9 @@ function WoWAI.GameContext()
 	end
 	if #parts > 0 then table.insert(lines, "Professions: " .. table.concat(parts, ", ")) end
 
-	-- Quest log ids (what is accepted, and which are done), so route planning can
-	-- skip pickups and turn-ins that no longer apply.
-	local quests = {}
-	local qn = Try(C_QuestLog and C_QuestLog.GetNumQuestLogEntries) or Try(GetNumQuestLogEntries)
-	if type(qn) == "number" then
-		for i = 1, math.min(qn, 40) do
-			local id, header, complete
-			local info = Try(C_QuestLog and C_QuestLog.GetInfo, i)
-			if type(info) == "table" then
-				id, header = info.questID, info.isHeader
-				complete = Try(C_QuestLog.IsComplete, id)
-			else
-				local _, _, _, isHeader, _, isComplete, _, qid = Try(GetQuestLogTitle, i)
-				id, header, complete = qid, isHeader, isComplete == 1 or isComplete == true
-			end
-			if not header and type(id) == "number" and id > 0 then
-				table.insert(quests, tostring(id) .. (complete and "*" or ""))
-			end
-		end
-	end
-	if #quests > 0 then table.insert(lines, "Quest log (id, * = ready to turn in): " .. table.concat(quests, ",")) end
+	-- The quest log with each objective's progress, what was turned in since
+	-- login, and whether the full completed history is on disk for the bridge.
+	for _, l in ipairs(WoWAI.QuestContextLines()) do table.insert(lines, l) end
 
 	local s = table.concat(lines, "\n"):gsub("[\30\31]", " ")
 	if #s > CONTEXT_MAX then s = s:sub(1, CONTEXT_MAX) end
@@ -3091,9 +3194,23 @@ ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("PLAYER_REGEN_ENABLED")
 ev:RegisterEvent("UPDATE_MACROS")
+ev:RegisterEvent("QUEST_TURNED_IN")
+ev:RegisterEvent("PLAYER_LOGOUT")
 ev:RegisterEvent("CHAT_MSG_WHISPER")
 ev:RegisterEvent("CHAT_MSG_BN_WHISPER")
 ev:SetScript("OnEvent", function(self, event, arg1)
+	if event == "QUEST_TURNED_IN" then
+		-- Absolute list for this login, sent in the context; saved data gets the full set.
+		if type(arg1) == "number" then
+			run.turnedIn = run.turnedIn or {}
+			table.insert(run.turnedIn, arg1)
+		end
+		if db then WoWAI.SaveQuestHistory() end
+		return
+	elseif event == "PLAYER_LOGOUT" then
+		if db then WoWAI.SaveQuestHistory() end
+		return
+	end
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON_NAME then
 			InitDB()
@@ -3105,6 +3222,11 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		if not db then InitDB() end
 		BuildUI()
 		run = { outbound = {} }
+		-- Was this character's completed history already written to disk (a previous
+		-- logout or /reload)? If not, the context tells the agent it is missing.
+		local ckey = CharKey()
+		run.historyOnDisk = ckey ~= nil and type(db.questsDone) == "table" and db.questsDone[ckey] ~= nil
+		C_Timer.After(5, WoWAI.SaveQuestHistory)
 		SelfTestSignals()
 		ProcessInbox()
 		if AnyPending() then
